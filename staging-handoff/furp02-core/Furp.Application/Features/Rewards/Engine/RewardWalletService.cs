@@ -101,6 +101,17 @@ BEGIN
           AND (ISNULL(c.[Floor], 0) <= 0
                OR @floorBasis IS NULL
                OR @floorBasis >= c.[Floor])
+          -- STAGING-SYNC: optional source filter. NULL = unrestricted multi-source (unchanged behaviour).
+          -- REFERRAL = referral credits only; BONUS (SCHEME/BONUS) = every non-referral credit; other value = exact CreditSource.
+          AND (@creditSource IS NULL
+               OR (@creditSource = N'REFERRAL'
+                   AND (UPPER(ISNULL(c.CreditSource, N'')) = N'REFERRAL'
+                        OR (NULLIF(LTRIM(RTRIM(c.CreditSource)), N'') IS NULL AND c.ReferralId IS NOT NULL)))
+               OR (@creditSource = N'BONUS'
+                   AND NOT (UPPER(ISNULL(c.CreditSource, N'')) = N'REFERRAL'
+                            OR (NULLIF(LTRIM(RTRIM(c.CreditSource)), N'') IS NULL AND c.ReferralId IS NOT NULL)))
+               OR (@creditSource NOT IN (N'REFERRAL', N'BONUS')
+                   AND UPPER(ISNULL(c.CreditSource, N'')) = @creditSource))
     ),
     Run AS (
         SELECT Id, CreditSource, CreditSourceDetail, [Floor], ReceiveCurrency, Remaining,
@@ -283,6 +294,10 @@ ORDER BY CreatedAt ASC, Id ASC;",
                 floorBasis = sendAmount;
             }
 
+            // STAGING-SYNC: optional additive source filter. NULL (key omitted / blank) = existing unrestricted
+            // multi-source behaviour. "REFERRAL" debits referral credits only; "SCHEME" / "BONUS" debits non-referral credits only.
+            var creditSource = NormalizeCreditSourceFilter(Text(body?["credit_source"] ?? body?["creditSource"]));
+
             if (amount <= 0)
             {
                 return Err(400, "Amount must be greater than zero.");
@@ -314,7 +329,9 @@ WHERE UserId = @userId AND TransferId = @transferId AND Type = N'APPLIED';",
             // STAGING-SYNC: advisory pre-check (gives precise BELOW_FLOOR / WRONG_CORRIDOR errors).
             // The authoritative, race-free check + debit happens in ApplyAtomicSql below under sp_getapplock.
             var remainingAll = RemainingCredits(
-                (await LoadUserRowsAsync(userId, currency, cancellationToken)).ToList());
+                (await LoadUserRowsAsync(userId, currency, cancellationToken)).ToList())
+                .Where(x => SourceOk(x.row, creditSource))
+                .ToList();
             var eligibleAvailable = remainingAll
                 .Where(x => CorridorOk(x.row, receiveCurrency) && FloorOk(x.row, floorBasis))
                 .Sum(x => x.remaining);
@@ -363,6 +380,7 @@ WHERE UserId = @userId AND TransferId = @transferId AND Type = N'APPLIED';",
                     amount,
                     receiveCurrency,
                     floorBasis,
+                    creditSource,
                     lockKey = "reward-wallet:" + userId
                 },
                 cancellationToken: cancellationToken);
@@ -680,6 +698,25 @@ FROM dbo.RewardBonusBlock WHERE UserId = @userId;",
                 new { userId },
                 cancellationToken: cancellationToken);
             return row?.Blocked == true;
+        }
+
+        // STAGING-SYNC: "REFERRAL" -> REFERRAL, "SCHEME"/"BONUS" -> BONUS (all non-referral), blank -> null (unrestricted),
+        // anything else -> that exact (upper-cased) CreditSource.
+        private static string NormalizeCreditSourceFilter(string raw)
+        {
+            var s = (raw ?? string.Empty).Trim().ToUpperInvariant();
+            if (s.Length == 0) return null;
+            if (s == "SCHEME" || s == "BONUS") return "BONUS";
+            return s;
+        }
+
+        private static bool SourceOk(LedgerRow row, string creditSourceFilter)
+        {
+            if (creditSourceFilter == null) return true;
+            var isReferral = string.Equals(row.CreditSource, "REFERRAL", StringComparison.OrdinalIgnoreCase);
+            if (creditSourceFilter == "REFERRAL") return isReferral;
+            if (creditSourceFilter == "BONUS") return !isReferral;
+            return string.Equals(row.CreditSource, creditSourceFilter, StringComparison.OrdinalIgnoreCase);
         }
 
         private static void EnrichSources(List<LedgerRow> rows)

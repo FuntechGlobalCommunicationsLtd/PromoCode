@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,6 +40,25 @@ namespace Furp.Application.Features.Rewards
 
         /// <summary>True when this transfer already has a redeemed promo, so a payment retry must not discount twice.</summary>
         Task<bool> HasRedeemedPromoAsync(string transferId, CancellationToken cancellationToken);
+    }
+
+    /// <summary>
+    /// STAGING-SYNC: tenant keys sent to the promo engine on validate AND redeem (restrictions.affiliates).
+    /// affiliate_id = the user's affiliate GUID (lower-case "D" format) when there is one, otherwise it is omitted;
+    /// site_key is always "rhemito". Written with Convert.ToString + Guid.TryParse so it compiles whether
+    /// User.AffiliateId is Guid, Guid?, string or int.
+    /// </summary>
+    public static class RewardAffiliateKey
+    {
+        public const string SiteKey = "rhemito";
+
+        public static string AffiliateId(User user)
+        {
+            var raw = Convert.ToString(user?.AffiliateId, CultureInfo.InvariantCulture);
+            return Guid.TryParse(raw, out var id) && id != Guid.Empty
+                ? id.ToString("D").ToLowerInvariant()
+                : null;
+        }
     }
 
     public class RewardCheckoutQuote
@@ -168,22 +188,22 @@ WHERE Status = N'REDEEMED'
             {
                 // Pass corridor + tenant so the engine can enforce promo restrictions
                 // (allowed corridors / affiliates / payment methods) saved in MITO Admin.
-                var affiliateKey = user?.AffiliateId is Guid aid && aid != Guid.Empty
-                    ? aid.ToString()
-                    : "rhemito";
-                var check = await _gateway.PostAsync("/api/promocodes/validate", new
+                // STAGING-SYNC: affiliate_id is omitted when the user has none; site_key is always "rhemito".
+                var validateBody = new Dictionary<string, object>
                 {
-                    code = quote.PromoCode,
-                    amount = quote.TransferAmount,
-                    fee = quote.Fee,
-                    currency = quote.Currency,
-                    user_id = user?.UserId.ToString(),
-                    source_currency = quote.Currency,
-                    dest_currency = quote.ReceiveCurrency,
-                    payment_method = quote.PaymentMethod,
-                    affiliate_id = affiliateKey,
-                    site_key = affiliateKey
-                }, cancellationToken);
+                    ["code"] = quote.PromoCode,
+                    ["amount"] = quote.TransferAmount,
+                    ["fee"] = quote.Fee,
+                    ["currency"] = quote.Currency,
+                    ["user_id"] = user?.UserId.ToString(),
+                    ["source_currency"] = quote.Currency,
+                    ["dest_currency"] = quote.ReceiveCurrency,
+                    ["payment_method"] = quote.PaymentMethod
+                };
+                var validateAffiliate = RewardAffiliateKey.AffiliateId(user);
+                if (validateAffiliate != null) validateBody["affiliate_id"] = validateAffiliate;
+                validateBody["site_key"] = RewardAffiliateKey.SiteKey;
+                var check = await _gateway.PostAsync("/api/promocodes/validate", validateBody, cancellationToken);
 
                 if (!check.Reachable)
                 {
@@ -208,7 +228,16 @@ WHERE Status = N'REDEEMED'
                 quote.PromoDiscount = discount;
                 // Percentage of value can add to the payout instead of reducing what they pay.
                 // Every other type keeps the existing payable reduction.
-                if (basis == "VALUE" && quote.PromoApply == "INCREASE_RECEIVE")
+                // STAGING-SYNC: FixedAmount codes discount the transfer AMOUNT (not the fee): the fee stays whole.
+                var appliesTo = (RewardEngineGateway.Text(check.Json?["applies_to"] ?? check.Json?["appliesTo"]) ?? string.Empty)
+                    .Trim()
+                    .ToLowerInvariant();
+                if (appliesTo == "amount")
+                {
+                    quote.PromoApply = "REDUCE_SEND";
+                    quote.SendAmount -= discount;
+                }
+                else if (basis == "VALUE" && quote.PromoApply == "INCREASE_RECEIVE")
                 {
                     quote.ReceiveBoost = discount;
                 }
@@ -304,26 +333,28 @@ WHERE Status = N'REDEEMED'
                 return quote;
             }
 
+            // STAGING-SYNC: true once /api/promocodes/redeem succeeded, so a later bonus-apply failure can release it.
+            var promoRedeemed = false;
+
             if (!string.IsNullOrWhiteSpace(quote.PromoCode))
             {
-                // STAGING-SYNC: same tenant key as /validate so redeem enforces the same affiliate / site restrictions.
-                var affiliateKey = user.AffiliateId is Guid aid && aid != Guid.Empty
-                    ? aid.ToString()
-                    : "rhemito";
-                var redeemed = await _gateway.PostAsync("/api/promocodes/redeem", new
+                // STAGING-SYNC: same tenant keys as /validate so redeem enforces the same affiliate / site restrictions.
+                var redeemBody = new Dictionary<string, object>
                 {
-                    code = quote.PromoCode,
-                    amount = quote.TransferAmount,
-                    fee = quote.Fee,
-                    currency = quote.Currency,
-                    user_id = user.UserId.ToString(),
-                    source_currency = quote.Currency,
-                    dest_currency = quote.ReceiveCurrency,
-                    payment_method = quote.PaymentMethod,
-                    transaction_id = transferId,
-                    affiliate_id = affiliateKey,
-                    site_key = affiliateKey
-                }, cancellationToken);
+                    ["code"] = quote.PromoCode,
+                    ["amount"] = quote.TransferAmount,
+                    ["fee"] = quote.Fee,
+                    ["currency"] = quote.Currency,
+                    ["user_id"] = user.UserId.ToString(),
+                    ["source_currency"] = quote.Currency,
+                    ["dest_currency"] = quote.ReceiveCurrency,
+                    ["payment_method"] = quote.PaymentMethod,
+                    ["transaction_id"] = transferId
+                };
+                var redeemAffiliate = RewardAffiliateKey.AffiliateId(user);
+                if (redeemAffiliate != null) redeemBody["affiliate_id"] = redeemAffiliate;
+                redeemBody["site_key"] = RewardAffiliateKey.SiteKey;
+                var redeemed = await _gateway.PostAsync("/api/promocodes/redeem", redeemBody, cancellationToken);
 
                 if (!redeemed.Reachable)
                 {
@@ -351,6 +382,8 @@ WHERE Status = N'REDEEMED'
                     quote.Message = RewardEngineGateway.PromoChangedMessage;
                     return quote;
                 }
+
+                promoRedeemed = true;
             }
 
             if (quote.BonusRequested > 0)
@@ -373,6 +406,7 @@ WHERE Status = N'REDEEMED'
 
                 if (!applied.Reachable)
                 {
+                    await ReleasePromoAsync(promoRedeemed, transferId, quote.PromoCode, cancellationToken);
                     quote.Ok = false;
                     quote.Message = RewardEngineGateway.UnavailableMessage;
                     return quote;
@@ -383,6 +417,7 @@ WHERE Status = N'REDEEMED'
                     var message = applied.ReadError("Your bonus balance has changed. Please review your transfer.");
                     if (message.IndexOf("already been applied", StringComparison.OrdinalIgnoreCase) < 0)
                     {
+                        await ReleasePromoAsync(promoRedeemed, transferId, quote.PromoCode, cancellationToken);
                         quote.Ok = false;
                         quote.Message = message;
                         return quote;
@@ -398,6 +433,26 @@ WHERE Status = N'REDEEMED'
             }
 
             return quote;
+        }
+
+        // STAGING-SYNC: best-effort release of an already-redeemed promo when the bonus wallet apply fails, so the
+        // customer does not lose the promo use. Release errors are ignored (the original failure message is returned).
+        private async Task ReleasePromoAsync(bool promoRedeemed, string transferId, string promoCode, CancellationToken cancellationToken)
+        {
+            if (!promoRedeemed || string.IsNullOrWhiteSpace(promoCode)) return;
+            try
+            {
+                await _gateway.PostAsync("/api/promocodes/release", new
+                {
+                    transaction_id = transferId,
+                    code = promoCode,
+                    reason = "BONUS_APPLY_FAILED"
+                }, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+                // ignore: best effort
+            }
         }
 
         private static decimal Available(Newtonsoft.Json.Linq.JObject wallet, string currency)

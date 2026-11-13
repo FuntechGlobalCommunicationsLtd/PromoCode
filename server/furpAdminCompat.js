@@ -18,7 +18,11 @@
 //
 // Forwarding is done by rewriting the request in place and letting the normal Express stack answer it, so every
 // existing /api/* route (and its auth / validation) behaves exactly as before. Only JSON responses are wrapped in
-// FURP's Result<T> envelope: { succeeded, code, message, data }. CSV / text responses pass through untouched.
+// FURP's Result<T> envelope: { succeeded, code, message, data }. CSV / text responses pass through untouched,
+// UNLESS the caller opts in with `Accept: application/json` or `?format=json` (URL query or tunnelled query): then a
+// text/csv answer is returned as Result<T> with data = { csv, filename, content_type }, which is what FURP's
+// `Rewards/engine` CSV export does (mito-admin downloads it as a Blob; an authenticated XHR cannot stream a raw
+// attachment through the IIS verb tunnel). `format` is never forwarded to the downstream route.
 //
 // Purely additive: requests that do not start with the admin prefix are never touched.
 
@@ -84,6 +88,52 @@ function wrapJson(res) {
     res.json = (body) => original(resultBody(res.statusCode || 200, body));
 }
 
+// CSV opt-in (additive). Opted in by ?format=json (URL query or tunnelled query) or an Accept header listing
+// application/json. `format` is removed from the query that is forwarded downstream.
+function splitFormat(queryString) {
+    const params = new URLSearchParams(String(queryString || '').replace(/^\?/, ''));
+    const optIn = String(params.get('format') || '').toLowerCase() === 'json';
+    params.delete('format');
+    const s = params.toString();
+    return { query: s ? '?' + s : '', optIn };
+}
+
+function acceptsJson(req) {
+    return String((req.headers && req.headers.accept) || '').toLowerCase().includes('application/json');
+}
+
+function filenameFromDisposition(disposition) {
+    const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(String(disposition || ''));
+    if (!m) return 'export.csv';
+    try { return decodeURIComponent(m[1].trim()); } catch (e) { return m[1].trim(); }
+}
+
+// Wrap res.send / res.end (only when the caller opted in, so nobody else is affected): a text/csv answer becomes
+// { csv, filename, content_type } inside the Result<T> envelope (res.json is already wrapped by wrapJson).
+function wrapCsv(res) {
+    const originalSend = res.send.bind(res);
+    const originalEnd = res.end.bind(res);
+    let converting = false;
+
+    const convert = (payload) => {
+        if (converting || res.headersSent) return false;
+        const type = String(res.get('Content-Type') || '');
+        if (!/^text\/csv/i.test(type)) return false;
+        if (typeof payload !== 'string' && !Buffer.isBuffer(payload)) return false;
+        converting = true;
+        const csv = Buffer.isBuffer(payload) ? payload.toString('utf8') : payload;
+        const filename = filenameFromDisposition(res.get('Content-Disposition'));
+        res.removeHeader('Content-Disposition');
+        res.removeHeader('Content-Length');
+        res.type('application/json');
+        res.json({ csv, filename, content_type: type });
+        return true;
+    };
+
+    res.send = (payload) => (convert(payload) ? res : originalSend(payload));
+    res.end = (chunk, ...rest) => (convert(chunk) ? res : originalEnd(chunk, ...rest));
+}
+
 function furpAdminCompat(req, res, next) {
     const pathOnly = String(req.originalUrl || req.url || '').split('?')[0];
     const lower = pathOnly.toLowerCase().replace(/\/+$/, '');
@@ -107,10 +157,12 @@ function furpAdminCompat(req, res, next) {
         if (!TUNNEL_VERBS.has(verb)) return sendResult(res, 400, { message: `Unsupported tunnelled method ${body.method}.` });
         const target = enginePath(body.path);
         if (!target) return sendResult(res, 400, { message: 'Invalid engine path.' });
+        const forwarded = splitFormat(toQueryString(target.query, body.query));
         req.method = verb;
-        req.url = target.path + toQueryString(target.query, body.query);
+        req.url = target.path + forwarded.query;
         req.body = body.body !== undefined && body.body !== null ? body.body : {};
         wrapJson(res);
+        if (forwarded.optIn || acceptsJson(req)) wrapCsv(res);
         return next();
     }
 
@@ -131,8 +183,10 @@ function furpAdminCompat(req, res, next) {
     if (!sub) return sendResult(res, 400, { message: 'Provide an engine path, e.g. /engine/referral-rules, or POST { method, path, query, body }.' });
     const target = enginePath('/' + sub);
     if (!target) return sendResult(res, 400, { message: 'Invalid engine path.' });
-    req.url = target.path + toQueryString(search);
+    const forwarded = splitFormat(toQueryString(search));
+    req.url = target.path + forwarded.query;
     wrapJson(res);
+    if (forwarded.optIn || acceptsJson(req)) wrapCsv(res);
     return next();
 }
 

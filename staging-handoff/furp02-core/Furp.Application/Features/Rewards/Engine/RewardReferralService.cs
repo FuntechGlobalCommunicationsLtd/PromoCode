@@ -29,16 +29,16 @@ BEGIN
     CREATE TABLE dbo.RewardReferralVisit (
         Id NVARCHAR(64) NOT NULL CONSTRAINT PK_RewardReferralVisit PRIMARY KEY,
         TrackingId NVARCHAR(64) NULL,
-        Code NVARCHAR(32) NOT NULL,
-        ReferrerId NVARCHAR(64) NOT NULL,
+        Code NVARCHAR(32) NULL,
+        ReferrerId NVARCHAR(64) NULL,
         RuleId NVARCHAR(64) NULL,
         Currency CHAR(3) NULL,
         ReceiveCurrency CHAR(3) NULL,
-        VisitorId NVARCHAR(64) NOT NULL,
+        VisitorId NVARCHAR(64) NULL,
         DeviceType NVARCHAR(32) NULL,
         OperatingSystem NVARCHAR(32) NULL,
-        SourceChannel NVARCHAR(32) NOT NULL CONSTRAINT DF_RewardReferralVisit_Channel DEFAULT (N'LINK'),
-        AttributionStatus NVARCHAR(32) NOT NULL CONSTRAINT DF_RewardReferralVisit_Status DEFAULT (N'CLICKED'),
+        SourceChannel NVARCHAR(32) NOT NULL CONSTRAINT DF_RewardReferralVisit_SourceChannel DEFAULT (N'LINK'),
+        AttributionStatus NVARCHAR(32) NOT NULL CONSTRAINT DF_RewardReferralVisit_AttributionStatus DEFAULT (N'CLICKED'),
         StoreTarget NVARCHAR(32) NULL,
         ResolvedAt DATETIME2 NULL,
         LinkedReferralId NVARCHAR(64) NULL,
@@ -46,26 +46,55 @@ BEGIN
         ExpiresAt DATETIME2 NULL,
         CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_RewardReferralVisit_CreatedAt DEFAULT (SYSUTCDATETIME())
     );
-    CREATE UNIQUE INDEX UX_RewardReferralVisit_Tracking
-        ON dbo.RewardReferralVisit (TrackingId) WHERE TrackingId IS NOT NULL;
-    CREATE INDEX IX_RewardReferralVisit_CodeVisitor
-        ON dbo.RewardReferralVisit (Code, VisitorId, CreatedAt);
-    CREATE INDEX IX_RewardReferralVisit_Linked
-        ON dbo.RewardReferralVisit (LinkedReferralId);
-    CREATE INDEX IX_RewardReferralVisit_Currency
-        ON dbo.RewardReferralVisit (Currency, CreatedAt);
 END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_RewardReferralVisit_TrackingId' AND object_id = OBJECT_ID(N'dbo.RewardReferralVisit'))
+    EXEC (N'CREATE UNIQUE INDEX UX_RewardReferralVisit_TrackingId
+                ON dbo.RewardReferralVisit (TrackingId) WHERE TrackingId IS NOT NULL;');
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RewardReferralVisit_CodeVisitor' AND object_id = OBJECT_ID(N'dbo.RewardReferralVisit'))
+    CREATE INDEX IX_RewardReferralVisit_CodeVisitor
+        ON dbo.RewardReferralVisit (Code, VisitorId, CreatedAt DESC);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RewardReferralVisit_Referrer' AND object_id = OBJECT_ID(N'dbo.RewardReferralVisit'))
+    CREATE INDEX IX_RewardReferralVisit_Referrer
+        ON dbo.RewardReferralVisit (ReferrerId, CreatedAt DESC);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RewardReferralVisit_LinkedReferee' AND object_id = OBJECT_ID(N'dbo.RewardReferralVisit'))
+    EXEC (N'CREATE INDEX IX_RewardReferralVisit_LinkedReferee
+                ON dbo.RewardReferralVisit (LinkedRefereeId) WHERE LinkedRefereeId IS NOT NULL;');
 
 IF COL_LENGTH(N'dbo.RewardCreditLedger', N'Floor') IS NULL
-BEGIN
     ALTER TABLE dbo.RewardCreditLedger ADD [Floor] DECIMAL(18,2) NULL;
-END;
-
 IF COL_LENGTH(N'dbo.RewardCreditLedger', N'ReceiveCurrency') IS NULL
-BEGIN
     ALTER TABLE dbo.RewardCreditLedger ADD ReceiveCurrency CHAR(3) NULL;
-END;
-";
+IF COL_LENGTH(N'dbo.RewardTransferFact', N'PaymentMethod') IS NULL
+    ALTER TABLE dbo.RewardTransferFact ADD PaymentMethod NVARCHAR(50) NULL;
+
+-- Unique index only when live data has no duplicates, so bootstrap can never fail on dirty data.
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_RewardPromoRedemption_Code_Transfer_Redeemed' AND object_id = OBJECT_ID(N'dbo.RewardPromoRedemption'))
+   AND NOT EXISTS (SELECT 1 FROM dbo.RewardPromoRedemption WHERE Status = N'REDEEMED' AND TransferId IS NOT NULL
+                   GROUP BY PromoCode, TransferId HAVING COUNT(*) > 1)
+    EXEC (N'CREATE UNIQUE INDEX UX_RewardPromoRedemption_Code_Transfer_Redeemed
+                ON dbo.RewardPromoRedemption (PromoCode, TransferId)
+                WHERE Status = N''REDEEMED'' AND TransferId IS NOT NULL;');
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RewardPromoRedemption_CodeStatusUser' AND object_id = OBJECT_ID(N'dbo.RewardPromoRedemption'))
+    CREATE INDEX IX_RewardPromoRedemption_CodeStatusUser
+        ON dbo.RewardPromoRedemption (PromoCode, Status, UserId)
+        INCLUDE (Discount, Currency, TransferId);
+
+IF OBJECT_ID(N'dbo.RewardReferralRuleAudit', N'U') IS NULL
+    CREATE TABLE dbo.RewardReferralRuleAudit (
+        Id BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_RewardReferralRuleAudit PRIMARY KEY,
+        RuleId NVARCHAR(64) NOT NULL,
+        Field NVARCHAR(64) NOT NULL,
+        OldValue NVARCHAR(MAX) NULL,
+        NewValue NVARCHAR(MAX) NULL,
+        AdminUser NVARCHAR(128) NULL,
+        CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_RewardReferralRuleAudit_CreatedAt DEFAULT (SYSUTCDATETIME()));
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RewardReferralRuleAudit_Rule' AND object_id = OBJECT_ID(N'dbo.RewardReferralRuleAudit'))
+    CREATE INDEX IX_RewardReferralRuleAudit_Rule ON dbo.RewardReferralRuleAudit (RuleId, Id DESC);
+
+IF COL_LENGTH(N'dbo.RewardPromoRedemption', N'Flow') IS NULL
+    ALTER TABLE dbo.RewardPromoRedemption ADD Flow NVARCHAR(16) NULL;";
 
         /// <summary>STAGING-SYNC: content type for the CSV exports below.</summary>
         public const string CsvContentType = "text/csv; charset=utf-8";
@@ -92,7 +121,16 @@ END;
         {
             await RewardSchema.EnsureAsync(_dapper, cancellationToken);
             if (Interlocked.CompareExchange(ref _stagingReady, 1, 1) == 1) return;
-            await _dapper.ExecuteAsync(StagingDdlSql, cancellationToken: cancellationToken);
+            // STAGING-SYNC: two nodes can race on the very first DDL run; retry once (same approach as RewardWalletService).
+            try
+            {
+                await _dapper.ExecuteAsync(StagingDdlSql, cancellationToken: cancellationToken);
+            }
+            catch
+            {
+                await _dapper.ExecuteAsync(StagingDdlSql, cancellationToken: cancellationToken);
+            }
+
             Interlocked.Exchange(ref _stagingReady, 1);
         }
 
@@ -218,19 +256,28 @@ WHEN NOT MATCHED THEN INSERT
         public Task<JObject> GetCodeAsync(string code, string currency, CancellationToken cancellationToken) =>
             GetCodeAsync(code, currency, null, cancellationToken);
 
+        public Task<JObject> GetCodeAsync(
+            string code,
+            string currency,
+            string receiveCurrency,
+            CancellationToken cancellationToken) =>
+            GetCodeAsync(code, currency, receiveCurrency, null, cancellationToken);
+
+        // STAGING-SYNC: referral code lookup with
+        //   * currency-suffixed share codes ({BASE}{CUR}, e.g. A1B2C3GBP) resolved to the referrer's base code
+        //   * currency precedence  explicit ?? codeCurrency ?? referrer.SendCurrency ?? "GBP"
+        //   * optional rule lock (?rule_id=): ENDED rule => LINK_EXPIRED, live rule => single locked offer
+        // (port of referral.js GET /api/referral/codes/:code). Old overloads delegate here with ruleId = null.
         public async Task<JObject> GetCodeAsync(
             string code,
             string currency,
             string receiveCurrency,
+            string ruleId,
             CancellationToken cancellationToken)
         {
             await EnsureAsync(cancellationToken);
-            code = (code ?? string.Empty).Trim().ToUpperInvariant();
-            var referrer = await _dapper.QueryFirstOrDefaultAsync<CustomerRow>(@"
-SELECT Id, FirstName, LastName, Email, SendCurrency, AccountStatus, KycStatus, ReferralCode, CreatedAt, UpdatedAt
-FROM dbo.RewardCustomer WHERE ReferralCode = @code;",
-                new { code },
-                cancellationToken: cancellationToken);
+            var (referrer, codeCurrency) = await ResolveCodeAsync(code, cancellationToken);
+            code = CanonicalCode(code);
             if (referrer == null)
             {
                 return new JObject { ["valid"] = false, ["error"] = "Invalid referral code", ["_httpStatus"] = 404 };
@@ -239,7 +286,69 @@ FROM dbo.RewardCustomer WHERE ReferralCode = @code;",
             // STAGING-SYNC: referrer must be ACTIVE.
             if (!IsActive(referrer)) return InactiveReferrerError(404, true);
 
-            var offer = await GetOfferAsync(referrer.Id, currency, receiveCurrency, cancellationToken);
+            var receive = NormaliseCurrency(receiveCurrency);
+            var requestedRuleId = string.IsNullOrWhiteSpace(ruleId) ? null : ruleId.Trim();
+            if (requestedRuleId != null)
+            {
+                var chosen = await _dapper.QueryFirstOrDefaultAsync<RuleRow>(@"
+SELECT TOP 1 Id, Name, Status, BaseCurrency, ReceiveCurrency, ConfigJson
+FROM dbo.RewardReferralRule WHERE Id = @id;",
+                    new { id = requestedRuleId },
+                    cancellationToken: cancellationToken);
+                if (chosen != null && !IsArchived(chosen))
+                {
+                    var chosenStatus = RuleStatus(chosen, UkToday());
+                    if (chosenStatus == "ENDED") return LinkExpired();
+                    if (chosenStatus == "ACTIVE")
+                    {
+                        var lockedOffer = await BuildOfferAsync(chosen, referrer, cancellationToken);
+                        return new JObject
+                        {
+                            ["valid"] = true,
+                            ["code"] = code,
+                            ["referrer_first_name"] = referrer.FirstName,
+                            ["rule_id"] = chosen.Id,
+                            ["offer"] = lockedOffer,
+                            ["offers"] = new JArray(lockedOffer.DeepClone()),
+                            ["send_currencies"] = new JArray(NormaliseCurrency(chosen.BaseCurrency) ?? chosen.BaseCurrency),
+                            ["currency_offers"] = new JArray(lockedOffer.DeepClone())
+                        };
+                    }
+                }
+            }
+
+            var effectiveCurrency = NormaliseCurrency(currency)
+                                    ?? codeCurrency
+                                    ?? NormaliseCurrency(referrer.SendCurrency)
+                                    ?? "GBP";
+
+            var live = await LoadLiveRulesAsync(cancellationToken);
+            var corridorRules = OfferRules(live, effectiveCurrency, receive);
+            if (corridorRules.Count == 0 && await HasEndedRuleForAsync(effectiveCurrency, receive, cancellationToken))
+            {
+                return LinkExpired();
+            }
+
+            if (codeCurrency != null && corridorRules.Count > 0)
+            {
+                var lockedOffers = new JArray();
+                foreach (var r in corridorRules) lockedOffers.Add(await BuildOfferAsync(r, referrer, cancellationToken));
+                var locked = new JObject
+                {
+                    ["valid"] = true,
+                    ["code"] = code,
+                    ["currency"] = effectiveCurrency
+                };
+                if (corridorRules.Count == 1) locked["rule_id"] = corridorRules[0].Id;
+                locked["referrer_first_name"] = referrer.FirstName;
+                locked["offer"] = lockedOffers[0].DeepClone();
+                locked["offers"] = lockedOffers;
+                locked["send_currencies"] = new JArray(effectiveCurrency);
+                locked["currency_offers"] = lockedOffers.DeepClone();
+                return locked;
+            }
+
+            var offer = await GetOfferAsync(referrer.Id, effectiveCurrency, receiveCurrency, cancellationToken);
             return new JObject
             {
                 ["valid"] = true,
@@ -253,10 +362,35 @@ FROM dbo.RewardCustomer WHERE ReferralCode = @code;",
             };
         }
 
+        private static JObject LinkExpired() =>
+            new JObject
+            {
+                ["valid"] = false,
+                ["error"] = "LINK_EXPIRED",
+                ["message"] = "Link Expired",
+                ["_httpStatus"] = 400
+            };
+
+        // True when a non-archived rule for this corridor exists but its end_date has passed.
+        private async Task<bool> HasEndedRuleForAsync(string currency, string receive, CancellationToken cancellationToken)
+        {
+            var rows = await _dapper.QueryAsync<RuleRow>(@"
+SELECT Id, Name, Status, BaseCurrency, ReceiveCurrency, ConfigJson
+FROM dbo.RewardReferralRule;",
+                new { },
+                cancellationToken: cancellationToken);
+            var cur = NormaliseCurrency(currency) ?? "GBP";
+            var today = UkToday();
+            return (rows ?? Array.Empty<RuleRow>()).Any(r =>
+                string.Equals(r.BaseCurrency?.Trim(), cur, StringComparison.OrdinalIgnoreCase)
+                && RuleStatus(r, today) == "ENDED"
+                && (receive == null || RuleReceive(r) == null
+                    || string.Equals(RuleReceive(r), receive, StringComparison.OrdinalIgnoreCase)));
+        }
         public async Task<JObject> CreateReferralAsync(JObject body, CancellationToken cancellationToken)
         {
             await EnsureAsync(cancellationToken);
-            var code = (Text(body?["code"] ?? body?["referral_code"]) ?? string.Empty).Trim().ToUpperInvariant();
+            var code = CanonicalCode(Text(body?["code"] ?? body?["referral_code"]));
             var referee = body?["referee"] as JObject;
             var refereeId = Text(
                 body?["referee_id"]
@@ -269,11 +403,8 @@ FROM dbo.RewardCustomer WHERE ReferralCode = @code;",
                 return new JObject { ["error"] = "code and referee are required", ["_httpStatus"] = 400 };
             }
 
-            var referrer = await _dapper.QueryFirstOrDefaultAsync<CustomerRow>(@"
-SELECT Id, FirstName, LastName, Email, SendCurrency, AccountStatus, KycStatus, ReferralCode, CreatedAt, UpdatedAt
-FROM dbo.RewardCustomer WHERE ReferralCode = @code;",
-                new { code },
-                cancellationToken: cancellationToken);
+            // STAGING-SYNC: exact code first, then currency-suffixed share code ({BASE}{CUR}); the full code is kept below.
+            var (referrer, _) = await ResolveCodeAsync(code, cancellationToken);
             if (referrer == null)
                 return new JObject { ["error"] = "Invalid referral code", ["_httpStatus"] = 400 };
             // STAGING-SYNC: referrer must be ACTIVE, otherwise REFERRER_INACTIVE.
@@ -812,20 +943,20 @@ VALUES
         public async Task<JObject> VisitAsync(JObject body, string userAgent, CancellationToken cancellationToken)
         {
             await EnsureAsync(cancellationToken);
-            var code = (Text(body?["code"] ?? body?["referralCode"] ?? body?["referral_code"]) ?? string.Empty)
-                .Trim().ToUpperInvariant();
+            var code = CanonicalCode(Text(body?["code"] ?? body?["referralCode"] ?? body?["referral_code"]));
             if (!Regex.IsMatch(code, "^[A-Z0-9]{6,16}$"))
             {
                 return new JObject
                 {
                     ["success"] = false,
                     ["error"] = "INVALID_FORMAT",
-                    ["message"] = "Referral codes are 6–12 letters and numbers.",
+                    ["message"] = "Referral codes are 6–16 letters and numbers.",
                     ["_httpStatus"] = 400
                 };
             }
 
-            var referrer = await FindReferrerByCodeAsync(code, cancellationToken);
+            // STAGING-SYNC: currency-suffixed share codes resolve to the base referrer; the visit row stores the FULL code.
+            var (referrer, _) = await ResolveCodeAsync(code, cancellationToken);
             if (referrer == null)
             {
                 return new JObject
@@ -1007,7 +1138,7 @@ UPDATE dbo.RewardReferralVisit SET AttributionStatus = N'EXPIRED' WHERE Id = @id
                     "This referral install link has expired. You can still enter a referral code manually.");
             }
 
-            var referrer = await FindReferrerByCodeAsync(click.Code, cancellationToken);
+            var (referrer, _) = await ResolveCodeAsync(click.Code, cancellationToken);
             if (referrer == null)
             {
                 return TrackingError("NOT_FOUND",
@@ -1708,6 +1839,47 @@ SELECT Id, FirstName, LastName, Email, SendCurrency, AccountStatus, KycStatus, R
 FROM dbo.RewardCustomer WHERE Id = @id;",
                 new { id },
                 cancellationToken: cancellationToken);
+        }
+
+        /// <summary>
+        /// Currency suffixes recognised on share codes ({BASE}{CUR}); the order is exact (prototype SUPPORTED_CURRENCIES).
+        /// </summary>
+        public static readonly string[] SupportedCurrencies =
+            { "GBP", "USD", "EUR", "NGN", "CAD", "AUD", "JPY", "CNY", "INR", "ZAR", "KES", "GHS", "AED" };
+
+        /// <summary>Canonical referral code: trim, upper-case, every non [A-Z0-9] char removed. Valid = ^[A-Z0-9]{6,16}$.</summary>
+        public static string CanonicalCode(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+            var sb = new StringBuilder(raw.Length);
+            foreach (var ch in raw.Trim().ToUpperInvariant())
+            {
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) sb.Append(ch);
+            }
+
+            return sb.ToString();
+        }
+
+        // STAGING-SYNC: exact ReferralCode match first; otherwise, when the code is at least 9 chars and ends with a
+        // supported currency, look up the base code (code minus the 3-letter suffix) and report that suffix as codeCurrency.
+        // (port of referral.js lookupCode / parseCurrencyCodeSuffix)
+        private async Task<(CustomerRow Referrer, string CodeCurrency)> ResolveCodeAsync(string code, CancellationToken cancellationToken)
+        {
+            var clean = CanonicalCode(code);
+            if (clean.Length == 0) return (null, null);
+            var exact = await FindReferrerByCodeAsync(clean, cancellationToken);
+            if (exact != null) return (exact, null);
+            if (clean.Length >= 9)
+            {
+                foreach (var cur in SupportedCurrencies)
+                {
+                    if (!clean.EndsWith(cur, StringComparison.Ordinal)) continue;
+                    var baseReferrer = await FindReferrerByCodeAsync(clean[..^cur.Length], cancellationToken);
+                    return baseReferrer != null ? (baseReferrer, cur) : (null, null);
+                }
+            }
+
+            return (null, null);
         }
 
         private Task<CustomerRow> FindReferrerByCodeAsync(string code, CancellationToken cancellationToken) =>
