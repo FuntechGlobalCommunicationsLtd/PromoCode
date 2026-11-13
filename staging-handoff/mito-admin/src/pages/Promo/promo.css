@@ -1,0 +1,528 @@
+/* Promo Codes admin page — Figma Rewards/Promo Codes look & feel (5557:103844 & 5570:11722) */
+.promo-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.promo-head-top {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+}
+
+.promo-head-top .rf-title,
+.promo-head-top .rf-subtitle {
+    margin: 0;
+}
+
+.promo-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.promo-mono {
+    font-family: 'Open Sans', 'BentonSans Regular', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.promo-tag {
+    margin-left: 8px;
+    font-family: inherit;
+}
+
+.promo-kpi-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 8px;
+}
+
+.promo-kpi-cur-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    line-height: 19.5px;
+    color: #605e5c;
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.promo-kpi-multi {
+    font-size: 24px;
+    font-weight: 700;
+    color: #605e5c;
+    line-height: 36px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+}
+
+.promo-where {
+    min-width: 150px;
+}
+
+.promo-page .rf-table td {
+    vertical-align: middle;
+}
+
+.promo-chip-sm {
+    margin-right: 4px;
+    display: inline-block;
+    margin-bottom: 2px;
+}
+
+/* Validity cell & days-left pill */
+.promo-validity-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.promo-days-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px 12px;
+    border-radius: 99px;
+    font-size: 10px;
+    line-height: 15px;
+    font-weight: 400;
+    white-space: nowrap;
+}
+
+.promo-days-pill.warn {
+    background: #fff6d1;
+    color: #605e5c;
+}
+
+.promo-days-pill.error {
+    background: #fde7e9;
+    color: #8f0404;
+}
+
+.promo-days-pill.ok {
+    background: #eff6fc;
+    color: #0078d4;
+}
+
+/* Actions cell: Figma 3-icon row (Edit, Delete, More dropdown) */
+.promo-actions-bar {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.promo-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 2px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.promo-icon-btn:hover:not(:disabled) {
+    background: #f3f2f1;
+}
+
+.promo-icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.promo-icon-btn img {
+    width: 24px;
+    height: 24px;
+    display: block;
+}
+
+.promo-more-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.promo-more-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    width: 149px;
+    background: #ffffff;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    padding: 8px 0;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.promo-more-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 6px 12px;
+    border: none;
+    background: transparent;
+    text-align: left;
+    font-size: 13px;
+    line-height: 19.5px;
+    color: #605e5c;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background-color 0.12s ease;
+}
+
+.promo-more-item:hover {
+    background: #f3f2f1;
+    color: #323130;
+}
+
+.promo-more-item.danger {
+    color: #a80000;
+}
+
+/* Modal / Form — Figma 5570:11722 */
+.promo-dialog {
+    max-width: 800px;
+    width: 95vw;
+    max-height: 92vh;
+    overflow-y: auto;
+    padding: 32px;
+    border-radius: 16px;
+}
+
+.promo-usage-dialog {
+    max-width: 1020px;
+    width: 94vw;
+}
+
+.promo-fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+    min-width: 0;
+}
+
+.promo-fieldset:disabled .rf-input,
+.promo-fieldset:disabled .rf-select {
+    background: #f3f2f1;
+}
+
+.promo-banner {
+    background: #fff6d1;
+    border: 1px solid #f59e0b;
+    color: #605e5c;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 16px;
+}
+
+.promo-suffix {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #605e5c;
+    pointer-events: none;
+}
+
+.promo-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 4px;
+    margin: 20px 0 12px;
+}
+
+.promo-section-head:first-of-type {
+    margin-top: 4px;
+}
+
+.promo-section-head .rf-section-label {
+    margin: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 400;
+    color: #605e5c;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.promo-form .rf-grid {
+    gap: 16px;
+    margin-bottom: 16px;
+    align-items: start;
+}
+
+.promo-form .rf-field label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+    font-size: 13px;
+    line-height: 19.5px;
+    font-weight: 400;
+    color: #605e5c;
+}
+
+.promo-form .rf-hint {
+    font-size: 10px;
+    line-height: 15px;
+    color: #605e5c;
+    margin-top: 4px;
+}
+
+.promo-subcard {
+    background: #f3f2f1;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    padding: 16px;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.promo-flow-segmented {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    background: #e1dfdd;
+    padding: 4px;
+    border-radius: 6px;
+    width: 100%;
+    box-sizing: border-box;
+    gap: 4px;
+}
+
+.promo-flow-segmented label {
+    margin: 0 !important;
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px !important;
+    line-height: 19.5px !important;
+    font-weight: 400 !important;
+    color: #605e5c !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+
+.promo-flow-segmented label.active {
+    background: #ffffff;
+    color: #323130 !important;
+    font-weight: 600 !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.promo-flow-segmented input[type="radio"] {
+    display: none;
+}
+
+.promo-inline-check {
+    margin: 0 !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    color: #605e5c !important;
+    cursor: pointer;
+}
+
+.promo-corridor-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 8px 0;
+}
+
+.promo-corridor-row .rf-select {
+    padding: 8px;
+}
+
+.promo-typeahead-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 30;
+    background: #fff;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+    max-height: 180px;
+    overflow-y: auto;
+    margin-top: 4px;
+}
+
+.promo-typeahead-item {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.promo-typeahead-item:hover {
+    background: #f3f2f1;
+}
+
+.promo-specific-box {
+    background: #f3f2f1;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    padding: 16px;
+    margin-top: 10px;
+}
+
+.promo-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.promo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid #e1dfdd;
+    background: #ffffff;
+    color: #323130;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.promo-chip button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: #605e5c;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+}
+
+.promo-methods {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed #e1dfdd;
+}
+
+.promo-methods .rf-check {
+    margin-bottom: 0;
+    font-size: 13px;
+}
+
+/* Figma Who can use it cards */
+.promo-audience-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    margin-bottom: 6px;
+}
+
+.promo-audience-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    background: #ffffff;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    margin: 0 !important;
+}
+
+.promo-audience-card:hover {
+    border-color: #c8c6c4;
+}
+
+.promo-audience-card.active {
+    border-color: #fb4b14;
+    background: #ffffff;
+}
+
+.promo-audience-card input[type="radio"] {
+    margin-top: 3px;
+    accent-color: #fb4b14;
+    width: 16px;
+    height: 16px;
+}
+
+/* Figma blue preview summary box */
+.promo-preview {
+    background: #e5f1fe;
+    border: 1px solid #4296eb;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 19.5px;
+    color: #605e5c;
+    margin: 16px 0 12px;
+}
+
+.promo-bulk-list {
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid #e1dfdd;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+.promo-history {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.promo-history li {
+    padding: 12px 0;
+    border-bottom: 1px solid #e1dfdd;
+    font-size: 13px;
+    color: #323130;
+}
+
+.promo-old {
+    color: #a19f9d;
+    text-decoration: line-through;
+}
+
+@media (max-width: 640px) {
+    .promo-methods,
+    .promo-audience-grid {
+        grid-template-columns: 1fr;
+    }
+}

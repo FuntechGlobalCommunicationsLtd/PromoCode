@@ -239,17 +239,30 @@ describe('The one bonus wallet', () => {
         expect(filtered.balances[0].available).toBe(b.available);
     });
 
-    rule('BONUS-13', 'Spending takes the credit that expires first, whatever its source', {
-        why: 'Soonest-expiry-first (D9/D13) stops customers losing credit to expiry while a later one sits unused.',
-        fix: 'applyBonus() walks creditsWithRemaining() ordered by expires_at then created_at and writes one APPLIED row per credit it draws on.',
+    rule('BONUS-13', 'Spending takes the credit that expires first within its reward category, and forbids mixing REFERRAL and SCHEME/MANUAL in one transfer', {
+        why: 'Soonest-expiry-first (D9/D13) stops customers losing credit to expiry while a later one sits unused, while single-source separation prevents stacking referral rewards with bonus schemes on a single transfer.',
+        fix: 'applyBonus() walks creditsWithRemaining() ordered by expires_at then created_at, filters by credit_source when provided ("REFERRAL" vs "SCHEME"/"BONUS"), and throws 400 MULTIPLE_REWARDS_NOT_ALLOWED when an unfiltered apply would combine referral and bonus credits.',
         where: ['server/bonus/wallet.js'],
     })(async () => {
         const c = cust();
         await grant(c, 4, { validity_days: 10 });
-        await bonus.issueCredit({ customerId: c, amount: 6, currency: 'GBP', validityDays: 30, creditSource: 'REFERRAL', creditSourceDetail: 'REFEREE', referenceId: `${c}:referee`, notes: 'Referee reward – invited by Ada O.' });
-        expect((await apply(c, 7, cust('P'))).body).toEqual({ applied: 7, available: 3 });
-        const used = Object.fromEntries((await balance(c)).by_source.map((g) => [g.credit_source, g.used]));
-        expect(used).toEqual({ MANUAL: 4, REFERRAL: 3 });
+        await bonus.issueCredit({ customerId: c, amount: 6, currency: 'GBP', validityDays: 30, creditSource: 'SCHEME', creditSourceDetail: 'TRANSACTION_THRESHOLD_CREDIT', referenceId: `${c}:scheme`, notes: 'Transfer bonus' });
+        await bonus.issueCredit({ customerId: c, amount: 5, currency: 'GBP', validityDays: 20, creditSource: 'REFERRAL', creditSourceDetail: 'REFEREE', referenceId: `${c}:referee`, notes: 'Referee reward – invited by Ada O.' });
+
+        // Combining REFERRAL (5) and non-referral bonus (4 + 6 = 10) into 12 is rejected with MULTIPLE_REWARDS_NOT_ALLOWED
+        const mixed = await apply(c, 12, cust('P'));
+        expect(mixed.status).toBe(400);
+        expect(mixed.body).toMatchObject({ error: 'MULTIPLE_REWARDS_NOT_ALLOWED' });
+
+        // Spending 7 from SCHEME/MANUAL takes the soonest-expiring credit first (MANUAL 4 expiring in 10d, then SCHEME 3 expiring in 30d)
+        expect((await apply(c, 7, cust('P'), { credit_source: 'SCHEME' })).body).toEqual({ applied: 7, available: 3 });
+        let used = Object.fromEntries((await balance(c)).by_source.map((g) => [g.credit_source, g.used]));
+        expect(used).toEqual({ MANUAL: 4, SCHEME: 3, REFERRAL: 0 });
+
+        // Spending with credit_source: 'REFERRAL' draws only from REFERRAL credits
+        expect((await apply(c, 5, cust('P'), { credit_source: 'REFERRAL' })).body).toEqual({ applied: 5, available: 0 });
+        used = Object.fromEntries((await balance(c)).by_source.map((g) => [g.credit_source, g.used]));
+        expect(used).toEqual({ MANUAL: 4, SCHEME: 3, REFERRAL: 5 });
     });
 
     rule('BONUS-14', 'Applying bonus: never more than the balance, never more than the send amount, once per transfer, no minimum send', {
@@ -282,10 +295,10 @@ describe('The one bonus wallet', () => {
         where: ['server/bonus/wallet.js', 'server/bonus/engine.js'],
     })(async () => {
         const c = cust();
-        await grant(c, 4);
-        await bonus.issueCredit({ customerId: c, amount: 6, currency: 'GBP', creditSource: 'REFERRAL', creditSourceDetail: 'REFEREE', referenceId: `${c}:referee`, notes: 'Referee reward – invited by Ada O.' });
+        await grant(c, 4, { validity_days: 10 });
+        await bonus.issueCredit({ customerId: c, amount: 6, currency: 'GBP', validityDays: 30, creditSource: 'SCHEME', creditSourceDetail: 'TRANSACTION_THRESHOLD_CREDIT', referenceId: `${c}:scheme`, notes: 'Transfer bonus' });
         const t = cust('P');
-        await apply(c, 7, t).expect(200);
+        await apply(c, 7, t, { credit_source: 'SCHEME' }).expect(200);
         const cancelled = await event(t, c, 100, { status: 'CANCELLED' });
         expect(cancelled.body.returned).toBe(7);
         expect((await event(t, c, 100, { status: 'CANCELLED' })).body.returned).toBe(0);
@@ -293,7 +306,7 @@ describe('The one bonus wallet', () => {
         const w = await walletOf(c);
         expect(w.balances[0].available).toBe(10);
         const returned = w.credits.filter((x) => x.reason_code === 'BONUS_RETURNED').map((x) => [x.credit_source, x.amount]).sort();
-        expect(returned).toEqual([['MANUAL', 4], ['REFERRAL', 3]]);
+        expect(returned).toEqual([['MANUAL', 4], ['SCHEME', 3]]);
     });
 
     rule('BONUS-16', 'A returned credit keeps its original expiry, or gets a 14-day grace if that has passed', {

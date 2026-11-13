@@ -13,9 +13,14 @@ const bonusTime = require('../../bonus/time');
 const GM = 'Bearer gm-token';
 let seq = 0;
 const n = () => ++seq;
-// Each rule gets its own corridor (send -> receive) so rules never collide; GBP/USD/NGN corridors are the seeded ones
+// Each rule gets its own send currency from POOL; beforeEach archives prior POOL rules so tests never collide on DUPLICATE_CURRENCY
 const POOL = ['EUR', 'CAD', 'AUD', 'CNY', 'INR', 'ZAR', 'KES', 'GHS', 'AED'];
-const PAIRS = POOL.flatMap((a) => POOL.filter((b) => b !== a).map((b) => [a, b]));
+const PAIRS = [];
+for (let offset = 1; offset < POOL.length; offset++) {
+    for (let i = 0; i < POOL.length; i++) {
+        PAIRS.push([POOL[i], POOL[(i + offset) % POOL.length]]);
+    }
+}
 let cseq = 0;
 const corridor = () => PAIRS[cseq++ % PAIRS.length];
 
@@ -23,7 +28,13 @@ const setNow = (iso) => { referral.clock.now = () => new Date(iso); bonusTime.cl
 const realNow = () => { referral.clock.now = () => new Date(); bonusTime.clock.now = () => new Date(); };
 
 beforeAll(async () => { await waitForSeed(app, request); });
-beforeEach(() => setNow('2030-01-01T10:00:00Z'));
+beforeEach(async () => {
+    setNow('2030-01-01T10:00:00Z');
+    const existing = (await request(app).get('/api/referral-rules')).body.data || [];
+    for (const r of existing.filter((x) => POOL.includes(x.base_currency))) {
+        await request(app).delete(`/api/referral-rules/${r.id}`);
+    }
+});
 afterEach(() => { realNow(); jest.restoreAllMocks(); });
 
 const mkRule = async (over = {}) => {
@@ -82,24 +93,34 @@ const tracked = async (qs) => (await request(app).get(`/api/referral/tracking?${
 const FILE = 'server/referral.js';
 
 describe('Rules: which rule applies and who it pays', () => {
-    rule('REFERRAL-01', 'The rule is matched by send currency and receive currency; a corridor rule beats an any-destination rule', {
-        why: 'Programmes are funded per corridor. A GBP->GHS referral must not be paid by the GBP->NGN budget, and a send-currency-only rule is the fallback for every other destination.',
-        fix: 'liveRuleFor() picks the live rule whose receive_currency equals the referee\'s, otherwise the live rule with no receive_currency. One non-archived rule per corridor (DUPLICATE_CORRIDOR, 409).',
+    rule('REFERRAL-01', 'The rule is matched by send currency and receive currency; one non-archived rule per send currency is enforced', {
+        why: 'Programmes are funded per send currency (with optional receive currency restriction). Only one non-archived rule per send currency is allowed (DUPLICATE_CURRENCY, 409) and rule names must be unique (DUPLICATE_NAME, 409).',
+        fix: 'checkDuplicates() enforces one non-archived rule per base_currency (DUPLICATE_CURRENCY, 409) and unique name (DUPLICATE_NAME, 409); liveRuleFor() picks the live rule whose receive_currency equals the referee\'s, otherwise the live rule with no receive_currency.',
         where: [FILE],
     })(async () => {
         const [send, a] = corridor();
         const b = POOL.find((c) => c !== send && c !== a);
-        const any = await mkRule({ corridor: [send, ''], name: `Any dest ${n()}`, referrer_reward: 1, referee_reward: 2 });
         const specific = await mkRule({ corridor: [send, a], referrer_reward: 7, referee_reward: 8 });
         const dup = await request(app).post('/api/referral-rules').send({ ...specific.body, name: `Dup ${n()}` });
         expect(dup.status).toBe(409);
-        expect(dup.body.error).toBe('DUPLICATE_CORRIDOR');
+        expect(dup.body.error).toBe('DUPLICATE_CURRENCY');
+        const dupAny = await request(app).post('/api/referral-rules').send({ ...specific.body, receive_currency: '', name: `Dup Any ${n()}` });
+        expect(dupAny.status).toBe(409);
+        expect(dupAny.body.error).toBe('DUPLICATE_CURRENCY');
+        const dupName = await request(app).post('/api/referral-rules').send({ ...specific.body, base_currency: b, receive_currency: a, name: specific.body.name });
+        expect(dupName.status).toBe(409);
+        expect(dupName.body.error).toBe('DUPLICATE_NAME');
 
         const referrer = await mkCustomer(send);
         const regTo = async (receive) => (await register(referrer.referral_code, {
             id: `RM-${n()}-${Date.now()}`, first_name: 'Mo', email: `m${seq}-${Date.now()}@example.com`, phone: `+44772${String(1000000 + seq)}`, send_currency: send, receive_currency: receive, kyc_status: 'PASSED', device_id: `d${seq}-${Date.now()}`,
         })).body.data;
         expect((await regTo(a)).rule_id).toBe(specific.id);
+        expect((await regTo(b)).rule_id).toBeNull();
+
+        await request(app).delete(`/api/referral-rules/${specific.id}`).expect(200);
+        const any = await mkRule({ corridor: [send, ''], name: `Any dest ${n()}`, referrer_reward: 1, referee_reward: 2 });
+        expect((await regTo(a)).rule_id).toBe(any.id);
         expect((await regTo(b)).rule_id).toBe(any.id);
     });
 
@@ -485,7 +506,7 @@ describe('Tracking, offers and performance endpoints', () => {
         expect((await tracked(`rule_id=${w.rule.id}&receive_currency=${other.rule.receive === w.rule.receive ? 'XXX' : other.rule.receive}`)).total).toBe(0);
         const csv = await request(app).get(`/api/referral/tracking.csv?rule_id=${w.rule.id}`);
         expect(csv.headers['content-type']).toMatch(/text\/csv/);
-        expect(csv.text.split('\n')[0]).toMatch(/^Referral ID,Referrer ID,Referrer,Referee ID,Referee,Rule/);
+        expect(csv.text.split('\n')[0]).toMatch(/^Referral ID,(Tracking ID,Channel,Attribution Method,)?Referrer ID,Referrer,Referee ID,Referee,Rule/);
         expect(csv.text.split('\n')).toHaveLength(2);
     });
 
@@ -552,5 +573,120 @@ describe('Tracking, offers and performance endpoints', () => {
         expect(await available(refereeId, s2)).toBe(25);
         expect(rule1.id).not.toBe(rule2.id);
         expect(rule3.id).not.toBe(rule2.id);
+    });
+
+    rule('REFERRAL-25', 'Currency-suffixed referral codes ({BASE}{CUR}, 6–16 chars) resolve the referrer and lock to the suffixed currency rule', {
+        why: 'Multi-currency referrers share codes with a 3-letter currency suffix (e.g. OLAYINKA1234CAD, up to 16 chars) so the referee lands on and receives that currency\'s welcome bonus without needing a query param.',
+        fix: 'lookupCode() accepts /^[A-Z0-9]{6,16}$/ and falls back to parseCurrencyCodeSuffix() to strip a trailing supported currency; GET /api/referral/codes/:code and createReferral() lock to look.currency.',
+        where: [FILE],
+    })(async () => {
+        const [s1, r1] = corridor();
+        const [s2, r2] = corridor();
+        await mkRule({ corridor: [s1, r1], referrer_reward: 5, referee_reward: 10 });
+        const rule2 = await mkRule({ corridor: [s2, r2], referrer_reward: 15, referee_reward: 30 });
+        const referrer = await mkCustomer(s1);
+        const suffixedCode = `${referrer.referral_code}${s2}`;
+        expect(suffixedCode.length).toBeGreaterThanOrEqual(9);
+        expect(suffixedCode.length).toBeLessThanOrEqual(16);
+
+        const codeRes = await request(app).get(`/api/referral/codes/${suffixedCode}`);
+        expect(codeRes.status).toBe(200);
+        expect(codeRes.body).toMatchObject({
+            valid: true,
+            code: suffixedCode,
+            currency: s2,
+            rule_id: rule2.id,
+            send_currencies: [s2],
+        });
+        expect(codeRes.body.offer).toMatchObject({ rule_id: rule2.id, currency: s2, referee_reward: 30 });
+
+        const refereeId = `RB-SFX-${Date.now().toString(36)}-${n()}`;
+        const reg = await register(suffixedCode, {
+            id: refereeId, first_name: 'Zainab', last_name: 'Musa', email: `${refereeId}@example.com`, phone: `+44778${String(1000000 + seq)}`,
+            send_currency: s1, kyc_status: 'PASSED', device_id: `dev-${refereeId}`,
+        });
+        expect(reg.status).toBe(201);
+        expect(reg.body.data).toMatchObject({ status: 'REGISTERED', rule_id: rule2.id, currency: s2, receive_currency: r2, referee_credited: 30, code: suffixedCode });
+        expect(await available(refereeId, s2)).toBe(30);
+
+        // >16 chars is rejected as INVALID_FORMAT (400)
+        expect((await request(app).get('/api/referral/codes/ABCDEFGHIJKLMNOPQ')).status).toBe(400);
+    });
+
+    rule('REFERRAL-26', 'Rule audit history (/api/referral-rules/:id/audit) records creation, field updates and archiving', {
+        why: 'Compliance and Growth need an immutable change log of who created, edited or archived each referral rule and which fields changed.',
+        fix: 'POST /api/referral-rules inserts field="created"; PUT /api/referral-rules/:id diffs RULE_FIELDS and inserts changed fields; DELETE/archive inserts field="archived"; GET /api/referral-rules/:id/audit returns rows ordered by id DESC.',
+        where: [FILE],
+    })(async () => {
+        const r = await mkRule({ referrer_reward: 5, referee_reward: 10, min_transaction_threshold: 50 });
+        await request(app).put(`/api/referral-rules/${r.id}`).send({
+            ...r.body,
+            referrer_reward: 12,
+            min_transaction_threshold: 75,
+            admin_user: 'Grace Growth',
+        }).expect(200);
+        await request(app).delete(`/api/referral-rules/${r.id}`).expect(200);
+
+        const auditRes = await request(app).get(`/api/referral-rules/${r.id}/audit`);
+        expect(auditRes.status).toBe(200);
+        const rows = auditRes.body.data;
+        expect(rows.length).toBeGreaterThanOrEqual(4);
+        expect(rows[0]).toMatchObject({ rule_id: r.id, field: 'archived', old_value: '0', new_value: '1' });
+        expect(rows.find((x) => x.field === 'referrer_reward')).toMatchObject({ old_value: '5', new_value: '12', admin_user: 'Grace Growth' });
+        expect(rows.find((x) => x.field === 'min_transaction_threshold')).toMatchObject({ old_value: '50', new_value: '75', admin_user: 'Grace Growth' });
+        expect(rows[rows.length - 1]).toMatchObject({ rule_id: r.id, field: 'created', old_value: null, new_value: r.body.name });
+    });
+
+    rule('REFERRAL-27', 'FURP admin compat shim wraps CSV exports in Result<{ csv, filename, content_type }> on Accept: application/json or ?format=json while preserving raw text/csv by default', {
+        why: 'Mito Admin downloads CSV exports through authenticated fetch/verb-tunnelling expecting Result<{ csv, filename, content_type }>, while direct browser/curl callers without JSON opt-in expect raw text/csv.',
+        fix: 'furpAdminCompat.js checks acceptsJson(req) or ?format=json (stripping format from downstream query) and wraps text/csv payloads in { succeeded: true, code: 200, data: { csv, filename, content_type } }.',
+        where: ['server/furpAdminCompat.js', FILE],
+    })(async () => {
+        const w = await world();
+        await qualifyAndComplete(w);
+        const engineBase = '/api/v1/Affiliate/AdminSettings/Rewards/engine';
+
+        // Default Accept preserves raw text/csv
+        const rawCsv = await request(app).get(`${engineBase}/referral/tracking.csv?rule_id=${w.rule.id}`).set('Accept', 'text/csv');
+        expect(rawCsv.status).toBe(200);
+        expect(rawCsv.headers['content-type']).toMatch(/text\/csv/);
+        expect(rawCsv.text).toMatch(/^Referral ID,/);
+
+        // Opt-in via Accept: application/json returns Result<{ csv, filename, content_type }>
+        const jsonAccept = await request(app).get(`${engineBase}/referral/tracking.csv?rule_id=${w.rule.id}`).set('Accept', 'application/json');
+        expect(jsonAccept.status).toBe(200);
+        expect(jsonAccept.headers['content-type']).toMatch(/application\/json/);
+        expect(jsonAccept.body).toMatchObject({
+            succeeded: true,
+            code: 200,
+            data: {
+                filename: 'referral-tracking.csv',
+                content_type: expect.stringMatching(/^text\/csv/i),
+            },
+        });
+        expect(jsonAccept.body.data.csv).toMatch(/^Referral ID,/);
+
+        // Opt-in via ?format=json (with Accept: */*) and via POST verb tunnel
+        const jsonQuery = await request(app).get(`${engineBase}/referral/performance.csv?format=json`).set('Accept', '*/*');
+        expect(jsonQuery.status).toBe(200);
+        expect(jsonQuery.body).toMatchObject({
+            succeeded: true,
+            code: 200,
+            data: {
+                filename: 'referral-performance.csv',
+                content_type: expect.stringMatching(/^text\/csv/i),
+            },
+        });
+        expect(jsonQuery.body.data.csv).toMatch(/^Rule,Send Currency,/);
+
+        const tunnelCsv = await request(app).post(engineBase).set('Accept', '*/*').send({
+            method: 'GET',
+            path: '/api/referral/tracking.csv',
+            query: { rule_id: w.rule.id, format: 'json' },
+        });
+        expect(tunnelCsv.status).toBe(200);
+        expect(tunnelCsv.body.succeeded).toBe(true);
+        expect(tunnelCsv.body.data.filename).toBe('referral-tracking.csv');
+        expect(tunnelCsv.body.data.csv.split('\n')).toHaveLength(2);
     });
 });

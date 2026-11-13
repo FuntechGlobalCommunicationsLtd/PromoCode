@@ -11,6 +11,9 @@ const PORT = process.env.PORT || 5050;
 app.use(cors());
 app.use(bodyParser.json());
 
+// IIS-compatible FURP admin proxy (POST verb-tunnelling + Result<T> envelope); only touches /api/v1/Affiliate/AdminSettings/Rewards*
+app.use(require('./furpAdminCompat').furpAdminCompat);
+
 // Serve Static Files
 app.use(express.static(path.join(__dirname, '../client/dist')));
 

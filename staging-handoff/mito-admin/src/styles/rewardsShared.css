@@ -1,0 +1,110 @@
+/* Scoped Rewards Hub & Mito Brand Staging helper tokens/classes.
+ * Safe to import inside RewardsHub.jsx or standalone Rewards routes without
+ * altering existing mito-admin global layout rules. */
+
+.rewards-hub-root,
+.rf-page {
+    --primary: #FB4B14;
+    --primary-hover: #e03e0b;
+    --primary-light: #ffede7;
+    --text-main: #323130;
+    --text-muted: #605e5c;
+    --border-subtle: #e2e8f0;
+}
+
+.rewards-hub-root .panel {
+    position: relative;
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+    margin-bottom: 24px;
+}
+
+.rewards-hub-root .glass-panel,
+.rf-page .glass-panel {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+.rewards-hub-root .btn-primary,
+.rf-page .btn-primary {
+    background: #FB4B14;
+    border: 1px solid #FB4B14;
+    padding: 8px 20px;
+    border-radius: 6px;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.rewards-hub-root .btn-primary:hover:not(:disabled),
+.rf-page .btn-primary:hover:not(:disabled) {
+    background: #e03e0b;
+    border-color: #e03e0b;
+}
+
+.rewards-hub-root .btn-primary:disabled,
+.rf-page .btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.rewards-hub-root .btn-secondary,
+.rf-page .btn-secondary {
+    background: #ffffff;
+    border: 1px solid #e0e6ed;
+    padding: 8px 20px;
+    border-radius: 6px;
+    color: #323130;
+    font-weight: 600;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.rewards-hub-root .btn-secondary:hover:not(:disabled),
+.rf-page .btn-secondary:hover:not(:disabled) {
+    border-color: #FB4B14;
+    color: #ffffff;
+    background: #FB4B14;
+}
+
+.rewards-hub-root .table-container {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.rewards-hub-root .table-container th {
+    text-align: left;
+    padding: 12px 16px;
+    color: #64748b;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.rewards-hub-root .table-container td {
+    padding: 12px 16px;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 0.875rem;
+    color: #323130;
+}
