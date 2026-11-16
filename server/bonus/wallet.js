@@ -217,6 +217,16 @@ async function issueCredit(q, input) {
 async function voidCredit(q, creditId, { reason = 'SCHEME_REVERSAL', notes, eventId, clawback = false } = {}) {
     const credit = await q.get(`SELECT * FROM credit_ledger WHERE id = ? AND type = 'EARNED'`, [creditId]);
     if (!credit) throw new Reject(404, 'NOT_FOUND', 'Credit not found.');
+    if (reason === 'REFERRAL_REVERSAL' && eventId) {
+        const appliedOnEvent = await q.get(
+            `SELECT a.id FROM credit_ledger a
+             LEFT JOIN credit_ledger src ON src.id = a.source_credit_id
+             WHERE a.user_id = ? AND a.transfer_id = ? AND a.type = 'APPLIED'
+               AND (a.source_credit_id = ? OR src.returned_from_credit_id = ?)`,
+            [credit.user_id, eventId, creditId, creditId],
+        );
+        if (appliedOnEvent) await releaseBonus(q, credit.user_id, eventId);
+    }
     const done = await q.get(`SELECT id FROM credit_ledger WHERE source_credit_id = ? AND type = 'VOIDED' AND reason_code = ?`, [creditId, reason]);
     let voided = 0;
     if (!done) {
@@ -226,10 +236,31 @@ async function voidCredit(q, creditId, { reason = 'SCHEME_REVERSAL', notes, even
             voided = remaining;
         }
     }
-    const spentRow = await q.get(`SELECT COALESCE(-SUM(amount), 0) AS s FROM credit_ledger WHERE source_credit_id = ? AND type = 'APPLIED'`, [creditId]);
-    const spent = round2(spentRow.s);
+    if (reason === 'REFERRAL_REVERSAL') {
+        const returnedCredits = await q.all(`SELECT * FROM credit_ledger WHERE returned_from_credit_id = ? AND type = 'EARNED'`, [creditId]);
+        for (const rc of returnedCredits) {
+            const rcDone = await q.get(`SELECT id FROM credit_ledger WHERE source_credit_id = ? AND type = 'VOIDED' AND reason_code = ?`, [rc.id, reason]);
+            if (!rcDone) {
+                const rcRemaining = await creditRemaining(q, rc);
+                if (rcRemaining > 0) {
+                    await debit(q, rc, rcRemaining, 'VOIDED', { reason, referenceId: eventId || `void:${rc.id}`, notes: notes || 'Bonus removed', transferId: eventId });
+                    voided = round2(voided + rcRemaining);
+                }
+            }
+        }
+    }
+    const spentRow = await q.get(
+        `SELECT COALESCE(-SUM(amount), 0) AS s FROM credit_ledger
+         WHERE type = 'APPLIED' AND (source_credit_id = ? OR source_credit_id IN (SELECT id FROM credit_ledger WHERE returned_from_credit_id = ? AND type = 'EARNED'))`,
+        [creditId, creditId],
+    );
+    const returnedRow = await q.get(
+        `SELECT COALESCE(SUM(amount), 0) AS s FROM credit_ledger WHERE returned_from_credit_id = ? AND type = 'EARNED' AND reason_code = 'BONUS_RETURNED'`,
+        [creditId],
+    );
+    const spent = Math.max(0, round2(Number(spentRow.s) - Number(returnedRow.s)));
     let clawedBack = 0;
-    if (clawback) clawedBack = await debt.clawback(q, credit, { eventId, notes });
+    if (clawback && spent > 0) clawedBack = await debt.clawback(q, credit, { eventId, notes });
     return { voided: round2(voided), spent, clawed_back: clawedBack };
 }
 
@@ -327,13 +358,34 @@ async function releaseBonus(q, customerId, transferId) {
     for (const a of applied) {
         const source = await q.get('SELECT * FROM credit_ledger WHERE id = ?', [a.source_credit_id]);
         const expiresOn = source && source.expires_at && source.expires_at >= today ? source.expires_at : addDays(today, RETURN_GRACE_DAYS);
-        await insertEarned(q, {
+        const rootCreditId = (source && source.returned_from_credit_id) || a.source_credit_id;
+        const retId = await insertEarned(q, {
             userId: customerId, amount: -a.amount, currency: a.currency, schemeId: source ? source.scheme_id : null, referenceId: `return:${transferId}`,
             reason: 'BONUS_RETURNED', notes: `Bonus returned – transfer ${transferId} cancelled or refunded`, expiresAt: expiresOn,
             referralId: a.referral_id, ruleId: a.referral_rule_id, transferId,
             creditSource: (source && source.credit_source) || 'MANUAL', creditSourceDetail: (source && source.credit_source_detail) || 'CORRECTION',
-            returnedFrom: a.source_credit_id,
+            returnedFrom: rootCreditId,
         });
+        const reversedVoid = rootCreditId
+            ? await q.get(
+                `SELECT reason_code, notes, transfer_id FROM credit_ledger
+                 WHERE (source_credit_id = ? OR source_credit_id IN (SELECT id FROM credit_ledger WHERE returned_from_credit_id = ?))
+                   AND type = 'VOIDED' AND reason_code IN ('REFERRAL_REVERSAL', 'SCHEME_REVERSAL') LIMIT 1`,
+                [rootCreditId, rootCreditId],
+            )
+            : null;
+        if (reversedVoid && !debt.enabled()) {
+            const retRow = await q.get('SELECT * FROM credit_ledger WHERE id = ?', [retId]);
+            const rem = retRow ? await creditRemaining(q, retRow) : 0;
+            if (rem > 0) {
+                await debit(q, retRow, rem, 'VOIDED', {
+                    reason: reversedVoid.reason_code,
+                    referenceId: reversedVoid.transfer_id || `void:${retId}`,
+                    notes: reversedVoid.notes || 'Bonus removed',
+                    transferId: reversedVoid.transfer_id || transferId,
+                });
+            }
+        }
         parts.push({ credit_source: (source && source.credit_source) || 'MANUAL', amount: -a.amount });
         total = round2(total - a.amount); currency = a.currency;
         if (!latestExpiry || expiresOn > latestExpiry) latestExpiry = expiresOn;
