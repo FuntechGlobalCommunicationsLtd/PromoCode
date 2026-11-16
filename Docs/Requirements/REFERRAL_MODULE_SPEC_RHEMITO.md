@@ -8,6 +8,8 @@
 **Approved visual design:** `docs/design/referral-bonus-spec.md` (direction "Mix", approved 03/10/2026). Reuse its tokens and patterns. New layouts in this spec (the Refer & Earn page, Section 7.5) need the UX approval step in `CLAUDE.md` before coding.
 
 > **v1.1 change — one balance, trackable by source.** Customers have **one bonus credit balance**. Referral rewards go into it alongside bonus-scheme rewards and goodwill credits, and each credit shows how it was earned. The balance, the dashboard pill, the "Use your bonus" step on Send Money and the Bonus & Discounts page belong to the Bonus module (`BONUS_MODULE_SPEC_RHEMITO.md`). This module no longer has its own credit pill, credit tab or "Use referral credit" step; it shows what the customer has earned from referrals and links to the balance. Customer wording is **bonus credit** everywhere.
+>
+> **2026-11-16 change (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`, approved by Product Owner Mohammad Mumtaz):** The Referee receives their welcome bonus credit immediately upon signing up and can redeem it on their first valid qualifying transfer (`≥ Floor` and matching corridor), while the Referrer earns their bonus credit when that first qualifying transfer reaches `COMPLETED`. Approved Direction A UI copy & Dashboard Option 1 layout applied across `ReferralSignup.tsx`, `ReferralLanding.tsx`, `ReferEarnCard.tsx`, `ExistingUserReferralCard.tsx`, `rewards.ts`, `referralOpenGraph.ts`, and `Dashboard.tsx`. Superseded 08/10/2026 wording in §1.1, §7.2, §7.4, and §7.5 is preserved inline for audit history.
 
 ---
 
@@ -24,8 +26,8 @@
 ## 1. Purpose and scope
 
 ### 1.1 Customer outcomes
-- **Referrer** sees the live offer, copies or shares a personal link, follows each friend's progress and receives bonus credit.
-- **Referee** arrives through a link (or types a code), sees what they will get, signs up, and later receives bonus credit.
+- **Referrer** sees the live offer, copies or shares a personal link, follows each friend's progress and receives bonus credit when their friend's first qualifying transfer completes.
+- **Referee** arrives through a link (or types a code), sees what they will get, signs up, ~~and later receives bonus credit~~ *(Updated 2026-11-16, `DEC-2026-11-16-REFEREE-SIGNUP-BONUS`: receives their welcome bonus credit immediately on sign-up and can redeem it on their first valid qualifying transfer)*.
 - Referral rewards land in the customer's single bonus credit balance, tagged **Referral**; spending it is handled by the Bonus module.
 - Customers get in-app notifications about offers, friends joining, and referral rewards earned or removed (used / expiring / expired notifications come from the Bonus module for the whole balance).
 
@@ -221,9 +223,14 @@ Full-screen centred spinner with `Opening your invitation…` (`role="status"`),
 Rendered above the sign-up form fields.
 
 **With a stored referral and an offer:**
-- Bordered box: `**<Name> invited you** – get <referee_reward> bonus credit in 3 steps.` For REFERRER-only offers: `**<Name> invited you** to Rhemito.` (no amount, no strip).
-- 3-segment strip: `Join` (filled primary) · `Send <floor>+ in <QW> days` · `Get <referee_reward>`.
-- Code row: chip with check icon `<CODE>` + text button `Remove`. Remove clears the stored code and shows the manual field (collapsed state).
+- Bordered box: ~~`**<Name> invited you** – get <referee_reward> bonus credit in 3 steps.`~~ **Updated 2026-11-16 (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`, Direction A):** `**<Name> invited you** – get <referee_reward> bonus credit on joining via link.` For REFERRER-only offers: `**<Name> invited you** to Rhemito.` (no amount, no strip).
+- 3-segment strip: ~~`Join` (filled primary) · `Send <floor>+ in <QW> days` · `Get <referee_reward>`.~~ **Updated 2026-11-16 (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`, Direction A):**
+  - When `reward_type === "BOTH" && referrer_reward > 0`: `Join` (filled primary) · `Send <floor>+[ to <RCV>] in <QW> days` · `<Name> gets <referrer_reward>`.
+  - When `REFEREE`-only (`reward_type !== "BOTH" || referrer_reward <= 0`): `Join` (filled primary) · `Get <referee_reward> on sign-up` · `Send <floor>+[ to <RCV>] in <QW> days`.
+- 3rd bullet under `Why register & send with Rhemito` (`referral-invite-why-register`): `**<referee_reward> welcome bonus credit** added automatically when you sign up using the link`.
+- Multi-currency `otherOffers` line (`referral-invite-currencies`): `**<CUR>:** Get **<referee_reward>** bonus credit on sign-up — redeem on your first **<floor>+**[ to <RCV>] transfer in <QW> days.`
+- Applied code hook (`referral-code-hook` on `ReferralCodeField`): `You get <referee_reward> on sign-up (<Name> gets <referrer_reward> on your first successful transaction)` (parenthetical shown when `reward_type === "BOTH" && referrer_reward > 0`).
+- Code row: chip with check icon `<CODE>` + text button `Remove` (when manual). Remove clears the stored code and shows the manual field (collapsed state).
 
 **Without a stored referral:** text button `Have a referral code?` expands an optional field:
 - Label `Referral code (optional)`, max 12, uppercased on blur, validated on blur via RAPI-2.
@@ -263,7 +270,7 @@ Order: title `Refer & Earn` + text button `How it works` → offer sentence (`of
 | NOT_ELIGIBLE | `Not eligible` |
 | REVERSED | `Transfer refunded` |
 
-- **AC-7.4.4 How it works** dialog (close button, Esc): steps `1. Share your link with friends.` `2. Your friend joins and sends <floor> or more within <QW> days.` `3. You get <referrer_reward>, your friend gets <referee_reward>.` (omit the part that is 0) and terms: `Your reward is added to your bonus credit and can be used on transfers in <currency> for <BV> days after it is issued.` `Your friend must be new to Rhemito. Both of you need to complete identity checks.` `Rewards are removed if the qualifying transfer is refunded.` + (if cap) `You can earn up to <cap> rewards in this programme.` + (if end date) `Offer ends on <DD/MM/YYYY>.`
+- **AC-7.4.4 How it works** dialog (close button, Esc): ~~steps `1. Share your link with friends.` `2. Your friend joins and sends <floor> or more within <QW> days.` `3. You get <referrer_reward>, your friend gets <referee_reward>.` (omit the part that is 0)~~ **Updated 2026-11-16 (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):** `1. Share your referral link. When your friend signs up with it and verifies their email, they get <referee_reward> bonus credit straight away.` (or without reward amount for `REFERRER`-only); `2. They can redeem their bonus on their first qualifying transfer of <floor> or more[ to <RCV>] within <QW> days.`; `3. When that first successful transfer completes, <referrer_reward> bonus credit is added to your balance (valid for <BV> days).` (or `Unused welcome bonus credit remains valid for <BV> days from sign-up.` for `REFEREE`-only).
 
 ### 7.5 Refer & Earn page — `/refer-earn` (new; needs UX approval)
 Header: title `Refer & Earn`, subtitle `Invite friends and track their progress.`, currency selector when the customer has credit in more than one currency. Back button to the previous page. Tabs (`?tab=` selects): **Invite**, **My referrals**, **Your rewards**.
@@ -278,7 +285,7 @@ Header: title `Refer & Earn`, subtitle `Invite friends and track their progress.
 
 | Status | Help line |
 |---|---|
-| REGISTERED | `Waiting for their first transfer of <floor> or more · <n> day(s) left` |
+| REGISTERED | ~~`Waiting for their first transfer of <floor> or more · <n> day(s) left`~~ **Updated 2026-11-16:** `Waiting for their first successful transfer of <floor> or more · <n> day(s) left` |
 | PENDING | `Transfer in progress – you get <reward> when it completes` (REFEREE rules: `Transfer in progress`) |
 | REWARDED | `<credited> added to your bonus credit` / `Your friend received their bonus` when 0 |
 | EXPIRED | `They didn't send <floor> or more in time` |

@@ -282,9 +282,9 @@ describe('Registration, qualification and reward', () => {
         expect((await send(beyond, 'PAID')).body.referral.status).toBe('REGISTERED');
     });
 
-    rule('REFERRAL-10', 'The reward is credited to the bonus wallet when the first qualifying transfer is COMPLETED, not before, and is not a discount on that transfer', {
-        why: 'Referral rewards are bonus credit for the NEXT transfers (one wallet, credit_source REFERRAL). A discount on the qualifying transfer would pay before the money moved and bypass the wallet\'s expiry and reversal rules.',
-        fix: 'PAID only makes the referral PENDING. On COMPLETED tryAward() calls ports.rewardWallet.issueCredit({ creditSource: "REFERRAL", creditSourceDetail: REFERRER|REFEREE, referenceId: "<referral>:referrer|referee" }); no promo redemption or APPLIED row is created for the qualifying transfer.',
+    rule('REFERRAL-10', 'Referee welcome credit is issued at registration (never auto-deducted without choice) while referrer credit is issued only when the first qualifying transfer reaches COMPLETED', {
+        why: 'Per product owner approval (2026-11-16), the referee receives their welcome bonus credit immediately at registration and may choose to redeem it on their first valid qualifying transfer (REFERRAL-29), but it is never auto-deducted without customer choice; the referrer credit is issued only when that first qualifying transfer reaches COMPLETED.',
+        fix: 'createReferral() issues the referee welcome credit at registration; PAID moves the referral to PENDING; on COMPLETED tryAward() issues the referrer credit via ports.rewardWallet.issueCredit({ creditSource: "REFERRAL", creditSourceDetail: "REFERRER", referenceId: "<referral>:referrer" }) without auto-creating any promo redemption or APPLIED row.',
         where: [FILE, 'server/referralHost.js', 'server/bonus/wallet.js'],
     })(async () => {
         const w = await world();
@@ -336,18 +336,22 @@ describe('Registration, qualification and reward', () => {
         expect((await qualifyAndComplete(w)).status).toBe('REWARDED');
     });
 
-    rule('REFERRAL-13', 'Rewards wait for KYC: the referee (and the referrer, if paid) must have passed KYC; passing KYC releases them', {
-        why: 'No credit may be paid to a customer who has not passed KYC (compliance).',
-        fix: 'tryAward() leaves the referral PENDING with status_reason "Awaiting referee KYC" / "Awaiting referrer KYC"; upsertCustomer() with kyc_status PASSED re-runs tryAward for waiting referrals.',
+    rule('REFERRAL-13', 'Referee receives welcome bonus immediately on sign-up regardless of KYC status, while referrer reward waits for referrer KYC to pass', {
+        why: 'Approved by Product Owner Mohammad (2026-11-16): the referee gets their welcome bonus as soon as they sign up (Rhemito already gates Send Money payment behind KYC), whereas the referrer must have passed KYC before receiving their referrer reward.',
+        fix: 'createReferral() issues the referee credit immediately upon REGISTERED without waiting for referee KYC; tryAward() holds the completed referral in PENDING with status_reason "Awaiting referrer KYC" when the referrer\'s kyc_status !== "PASSED", and upsertCustomer() with kyc_status "PASSED" releases it without double-crediting the referee.',
         where: [FILE],
     })(async () => {
-        const w = await world({}, { referee: { kyc_status: 'PENDING' } });
+        const w = await world({}, { referrer: { kyc_status: 'PENDING' }, referee: { kyc_status: 'PENDING' } });
+        expect(await available(w.refereeId, w.rule.send)).toBe(10);
+        expect(await available(w.referrer.id, w.rule.send)).toBe(0);
         const waiting = await qualifyAndComplete(w);
-        expect(waiting).toMatchObject({ status: 'PENDING', status_reason: 'Awaiting referee KYC' });
-        expect(await available(w.refereeId, w.rule.send)).toBe(0);
-        await request(app).post('/api/referral/customers').send({ id: w.refereeId, kyc_status: 'PASSED' }).expect(200);
+        expect(waiting).toMatchObject({ status: 'PENDING', status_reason: 'Awaiting referrer KYC' });
+        expect(await available(w.referrer.id, w.rule.send)).toBe(0);
+        expect(await available(w.refereeId, w.rule.send)).toBe(10);
+        await request(app).post('/api/referral/customers').send({ id: w.referrer.id, kyc_status: 'PASSED' }).expect(200);
         const t = (await tracked(`rule_id=${w.rule.id}`)).data[0];
-        expect(t.status).toBe('REWARDED');
+        expect(t).toMatchObject({ status: 'REWARDED', referrer_credited: 5, referee_credited: 10 });
+        expect(await available(w.referrer.id, w.rule.send)).toBe(5);
         expect(await available(w.refereeId, w.rule.send)).toBe(10);
     });
 
@@ -814,5 +818,132 @@ describe('Tracking, offers and performance endpoints', () => {
             referee_credited: 10,
         });
         expect(await available(referrer2.id, 'GBP')).toBe(5);
+    });
+
+    rule('REFERRAL-29', 'Referee receives instant signup bonus and can redeem it on their first valid qualifying transaction', {
+        why: 'Approved by Product Owner Mohammad (2026-11-16): the referee receives their welcome bonus as soon as they sign up (even with kyc_status PENDING) and can redeem it on their first valid transaction meeting the rule\'s floor and corridor, while the referrer earns their bonus when that transaction completes.',
+        fix: 'createReferral() issues the referee credit immediately upon registration; wallet.applyBonus() enforces the rule\'s floor and receive_currency; cancellation restores the referee\'s credit and resets the referral to REGISTERED; completion credits the referrer without double-crediting the referee; refund voids the returned credit cleanly with zero residual balance or debt under both default clawback and BONUS_CLAWBACK=off.',
+        where: [FILE, 'server/bonus/wallet.js'],
+    })(async () => {
+        const w = await world(
+            { reward_type: 'BOTH', referrer_reward: 11, referee_reward: 21, min_transaction_threshold: 50 },
+            { referee: { kyc_status: 'PENDING' } },
+        );
+        expect(w.referral).toMatchObject({ status: 'REGISTERED', referrer_reward: 11, referee_reward: 21, referee_credited: 21, floor: 50 });
+        expect(await available(w.refereeId, w.rule.send)).toBe(21);
+
+        // Below floor is rejected with BELOW_FLOOR
+        const belowFloor = await request(app).post(`/api/wallet/${w.refereeId}/apply`).send({
+            amount: 21,
+            currency: w.rule.send,
+            receive_currency: w.rule.receive,
+            transfer_id: `TX-LOW-${n()}`,
+            send_amount: 40,
+        });
+        expect(belowFloor.status).toBe(400);
+        expect(belowFloor.body.error).toBe('BELOW_FLOOR');
+
+        // Wrong corridor is rejected with WRONG_CORRIDOR
+        const wrongCorridorCur = POOL.find((c) => c !== w.rule.send && c !== w.rule.receive);
+        const wrongCorridor = await request(app).post(`/api/wallet/${w.refereeId}/apply`).send({
+            amount: 21,
+            currency: w.rule.send,
+            receive_currency: wrongCorridorCur,
+            transfer_id: `TX-CORR-${n()}`,
+            send_amount: 50,
+        });
+        expect(wrongCorridor.status).toBe(400);
+        expect(wrongCorridor.body.error).toBe('WRONG_CORRIDOR');
+
+        // Applying 21 on first valid transaction (tx1) succeeds
+        const tx1 = `TX-VALID-1-${n()}`;
+        const app1 = await request(app).post(`/api/wallet/${w.refereeId}/apply`).send({
+            amount: 21,
+            currency: w.rule.send,
+            receive_currency: w.rule.receive,
+            transfer_id: tx1,
+            send_amount: 50,
+        });
+        expect(app1.status).toBe(200);
+        expect(app1.body).toEqual({ applied: 21, available: 0 });
+        expect((await send(w, 'PAID', { transfer_id: tx1, amount: 50 })).body.referral.status).toBe('PENDING');
+
+        // If tx1 is CANCELLED, referral returns to REGISTERED and referee's 21 available balance is restored
+        await request(app).post(`/api/wallet/${w.refereeId}/release`).send({ transfer_id: tx1 }).expect(200);
+        const cancelled = (await send(w, 'CANCELLED', { transfer_id: tx1, amount: 50 })).body.referral;
+        expect(cancelled).toMatchObject({ status: 'REGISTERED', qualifying_transfer_id: null });
+        expect(await available(w.refereeId, w.rule.send)).toBe(21);
+
+        // Referee applies 21 on tx2 (send_amount: 50, matching corridor), and tx2 goes PAID -> COMPLETED
+        const tx2 = `TX-VALID-2-${n()}`;
+        const app2 = await request(app).post(`/api/wallet/${w.refereeId}/apply`).send({
+            amount: 21,
+            currency: w.rule.send,
+            receive_currency: w.rule.receive,
+            transfer_id: tx2,
+            send_amount: 50,
+        });
+        expect(app2.status).toBe(200);
+        expect(app2.body).toEqual({ applied: 21, available: 0 });
+
+        await send(w, 'PAID', { transfer_id: tx2, amount: 50 });
+        const completed = (await send(w, 'COMPLETED', { transfer_id: tx2, amount: 50 })).body.referral;
+        expect(completed).toMatchObject({
+            status: 'REWARDED',
+            qualifying_transfer_id: tx2,
+            referrer_credited: 11,
+            referee_credited: 21,
+        });
+        expect(await available(w.referrer.id, w.rule.send)).toBe(11);
+        const refBalAfterComplete = (await walletOf(w.refereeId, w.rule.send)).balances[0];
+        expect(refBalAfterComplete).toMatchObject({
+            earned: 21,
+            used: 21,
+            available: 0,
+            outstanding_debt: 0,
+        });
+
+        // Refund test (1): default BONUS_CLAWBACK=on (both voidReferralCredits -> releaseBonus and releaseBonus -> voidReferralCredits)
+        await send(w, 'REFUNDED', { transfer_id: tx2, amount: 50 });
+        await request(app).post(`/api/wallet/${w.refereeId}/release`).send({ transfer_id: tx2 }).expect(200);
+        const refBalAfterRefundOn = (await walletOf(w.refereeId, w.rule.send)).balances[0];
+        expect(refBalAfterRefundOn).toMatchObject({ available: 0, outstanding_debt: 0 });
+        expect(await available(w.referrer.id, w.rule.send)).toBe(0);
+
+        // Refund test (2): BONUS_CLAWBACK=off in both event orders (releaseBonus -> voidReferralCredits AND voidReferralCredits -> releaseBonus)
+        const prevClawback = process.env.BONUS_CLAWBACK;
+        process.env.BONUS_CLAWBACK = 'off';
+        try {
+            // Order B: releaseBonus first, then REFUNDED transfer event
+            const wOff1 = await world(
+                { reward_type: 'BOTH', referrer_reward: 11, referee_reward: 21, min_transaction_threshold: 50 },
+                { referee: { kyc_status: 'PENDING' } },
+            );
+            const txOff1 = `TX-OFF-1-${n()}`;
+            await request(app).post(`/api/wallet/${wOff1.refereeId}/apply`).send({
+                amount: 21, currency: wOff1.rule.send, receive_currency: wOff1.rule.receive, transfer_id: txOff1, send_amount: 50,
+            }).expect(200);
+            await qualifyAndComplete(wOff1, { transfer_id: txOff1, amount: 50 });
+            await request(app).post(`/api/wallet/${wOff1.refereeId}/release`).send({ transfer_id: txOff1 }).expect(200);
+            await send(wOff1, 'REFUNDED', { transfer_id: txOff1, amount: 50 });
+            expect((await walletOf(wOff1.refereeId, wOff1.rule.send)).balances[0]).toMatchObject({ available: 0, outstanding_debt: 0 });
+
+            // Order A: REFUNDED transfer event first, then releaseBonus
+            const wOff2 = await world(
+                { reward_type: 'BOTH', referrer_reward: 11, referee_reward: 21, min_transaction_threshold: 50 },
+                { referee: { kyc_status: 'PENDING' } },
+            );
+            const txOff2 = `TX-OFF-2-${n()}`;
+            await request(app).post(`/api/wallet/${wOff2.refereeId}/apply`).send({
+                amount: 21, currency: wOff2.rule.send, receive_currency: wOff2.rule.receive, transfer_id: txOff2, send_amount: 50,
+            }).expect(200);
+            await qualifyAndComplete(wOff2, { transfer_id: txOff2, amount: 50 });
+            await send(wOff2, 'REFUNDED', { transfer_id: txOff2, amount: 50 });
+            await request(app).post(`/api/wallet/${wOff2.refereeId}/release`).send({ transfer_id: txOff2 }).expect(200);
+            expect((await walletOf(wOff2.refereeId, wOff2.rule.send)).balances[0]).toMatchObject({ available: 0, outstanding_debt: 0 });
+        } finally {
+            if (prevClawback === undefined) delete process.env.BONUS_CLAWBACK;
+            else process.env.BONUS_CLAWBACK = prevClawback;
+        }
     });
 });

@@ -9,6 +9,8 @@
 **Wallet:** referral rewards are paid into the **single customer bonus wallet** owned by the Bonus module (`BONUS_MODULE_SPEC_MITO_ADMIN.md`, Section 3.11). Read that section before the wallet parts of this spec.
 
 > **v1.1 change — one balance, trackable by source.** The customer has one bonus credit balance. Referral rewards, bonus-scheme rewards and goodwill credits all go into it, and every credit records how it was earned (source `REFERRAL`, detail `REFERRER` or `REFEREE`, with the referral id and rule id). The referral module no longer has its own ledger, redemption, return or credit-expiry logic; it issues and voids credits through the `rewardWallet` port. Everything else in this spec is unchanged.
+>
+> **2026-11-16 change (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`, approved by Product Owner Mohammad Mumtaz):** The Referee receives their welcome bonus credit immediately upon registration (`REGISTERED`, regardless of KYC status, as Rhemito gates Send Money payment behind KYC) and can redeem it on their first valid qualifying transfer meeting the rule's Floor and Corridor (`receive_currency`), while the Referrer reward is issued when that first qualifying transfer reaches `COMPLETED` (and still requires the Referrer's KYC to be `PASSED`). Superseded 08/10/2026 rules in §1.1, D5, D8, D12, BR-27, BR-34, and BR-36 are preserved inline for audit history.
 
 ---
 
@@ -27,7 +29,7 @@
 ## 1. Purpose and scope
 
 ### 1.1 Purpose
-Mito Money admins configure referral programmes per corridor. An existing Rhemito customer (Referrer) shares a link/code. A new customer (Referee) registers with it and makes a qualifying transfer. The Referrer, the Referee or both receive **Referral Credit** that they can spend on a later transfer.
+Mito Money admins configure referral programmes per corridor. An existing Rhemito customer (Referrer) shares a link/code. A new customer (Referee) registers with it and makes a qualifying transfer. *(08/10/2026 baseline: The Referrer, the Referee or both receive **Referral Credit** that they can spend on a later transfer.)* **Updated 2026-11-16 (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):** When the rule rewards the Referee (`BOTH` or `REFEREE`), the Referee receives their welcome **Referral Credit** immediately upon signing up and can redeem it on their first valid qualifying transfer (meeting the rule's Floor and Corridor), while the Referrer receives their **Referral Credit** when that first qualifying transfer reaches `COMPLETED`.
 
 ### 1.2 What "independent module" means
 The Referral module is a self-contained unit inside the Mito Money Admin server and client:
@@ -138,14 +140,14 @@ NOT_ELIGIBLE→ REWARDED       (Growth Manager approval)
 | D2 | Only the first qualifying transfer counts; a referral is rewarded once. Earlier transfers below the Floor or on another corridor do not stop a later one from qualifying. |
 | D3 | A rule applies either to a send currency alone or to one corridor. A corridor rule beats the send-currency rule for that corridor. At most one non-archived rule per (send, receive) pair, and at most one send-currency rule per send currency. |
 | D4 | Rule values are snapshotted onto the referral at registration (or at binding, BR-22). Later edits, deactivation or archiving never change an existing referral. |
-| D5 | Credit is issued only when the qualifying transfer reaches `COMPLETED`. |
+| D5 | ~~Credit is issued only when the qualifying transfer reaches `COMPLETED`.~~ *(Superseded 2026-11-16, `DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):* **Referee** welcome credit is issued immediately at registration (`REGISTERED`); **Referrer** credit is issued only when the first qualifying transfer reaches `COMPLETED` (with fallback referee issuance in `tryAward` only if deferred or retrying under `BR-51`). |
 | D6 | Credit is always in the **send** currency of the rule. |
 | D7 | The Referee earns their bonus on the first transfer ≥ Floor made before **registration + max(QW, BV)** days. The Referrer is rewarded only if that transfer is within **registration + QW** days. |
-| D8 | Both parties must have passed KYC before their credit is issued. |
-| D9 | On reversal, the unused part of each referral credit is voided (`voidCredit` with `clawback: false`). Spent referral credit is not recovered (the host may wire `onSpentCreditReversed` to Bonus Debt). |
+| D8 | ~~Both parties must have passed KYC before their credit is issued.~~ *(Superseded 2026-11-16, `DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):* The **Referrer** must have passed KYC before their referrer credit is issued (`Awaiting referrer KYC`). The **Referee** receives their welcome credit immediately upon registration regardless of `kyc_status` (Rhemito enforces KYC verification before any Send Money transaction can be paid). |
+| D9 | On reversal, the unused part of each referral credit is voided (`voidCredit` with `clawback: false`). Spent referral credit is not recovered (the host may wire `onSpentCreditReversed` to Bonus Debt). **Updated 2026-11-16:** When a referee redeemed their sign-up referral credit on the qualifying transfer itself and that transfer is subsequently `REFUNDED`, any `BONUS_RETURNED` credit from that transfer is voided and excluded from `spent` so both `BONUS_CLAWBACK=on` and `BONUS_CLAWBACK=off` leave `available = 0` and `outstanding_debt = 0`. |
 | D10 | Rules are archived, never deleted. |
 | D11 | Referral Settings is the only place referral rewards are configured. The Bonus Scheme Manager must not offer a referral bonus type. |
-| D12 | There is no minimum send amount to **use** credit (spending is handled by the Bonus module wallet). The old "Minimum Send Amount to Redeem" field is removed. |
+| D12 | ~~There is no minimum send amount to **use** credit (spending is handled by the Bonus module wallet).~~ *(Updated 2026-11-16, `DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):* Manual and scheme bonus credits have no minimum send amount; **Referral Credits** enforce the rule's Floor (`min_transaction_threshold`, `BELOW_FLOOR`) and Corridor (`receive_currency`, `WRONG_CORRIDOR`) in `wallet.applyBonus`, allowing the Referee to redeem their welcome bonus on their first valid qualifying transfer. The old separate "Minimum Send Amount to Redeem" field remains retired. |
 | D13 | Admin wording is "Bonus", never "Commission". |
 | D14 | All dates shown as `DD/MM/YYYY` (UK). |
 
@@ -188,7 +190,7 @@ Triggered by Rhemito when the Referee **verifies their email** (API-S6).
   4. Otherwise `REGISTERED`.
 - **BR-25** Referrer = Referee id → 400 `OWN_LINK`, message `You cannot use your own referral link.` (no referral created).
 - **BR-26** Snapshot at creation: rule_id, currency, receive_currency, reward_type, referrer_reward, referee_reward, floor, QW, BV, `referrer_deadline = regDay + QW`, `qualification_deadline = regDay + (reward_type = REFERRER ? QW : max(QW, BV))`. Referral id format `REF-` + 8 uppercase hex.
-- **BR-27** When created as `REGISTERED`, append a `FRIEND_JOINED` event for the referrer (Section 8.2). For `REFEREE` rules the payload's `reward` is 0 and Rhemito words the message without an amount. No event is sent for referrals created as `NOT_ELIGIBLE`.
+- **BR-27** When created as `REGISTERED`, append a `FRIEND_JOINED` event for the referrer (Section 8.2). For `REFEREE` rules the payload's `reward` is 0 and Rhemito words the message without an amount. No event is sent for referrals created as `NOT_ELIGIBLE`. **Updated 2026-11-16 (`DEC-2026-11-16-REFEREE-SIGNUP-BONUS`):** When created as `REGISTERED` with a resolved rule where `reward_type ≠ REFERRER`, `referee_reward > 0`, and the referee is not blocked by `eligibilityGuard`, `createReferral()` immediately issues the referee's welcome credit (`<referralId>:referee`) into the bonus wallet without waiting for `kyc_status === 'PASSED'` (likewise when backfilling `REGISTERED` referrals on a live rule upgrade `REFERRER → BOTH/REFEREE`).
 
 ### 3.5 Transfer events and awarding
 Rhemito reports every status change of every transfer (API-S8). Statuses: `PAID`, `COMPLETED`, `CANCELLED`, `FAILED`, `REFUNDED`, `RECALLED`, `CHARGEBACK`.
@@ -197,11 +199,11 @@ Rhemito reports every status change of every transfer (API-S8). Statuses: `PAID`
 - **BR-31** Qualifying check on `PAID` or `COMPLETED` while the referral is `REGISTERED` (after BR-22): `rule_id` set, transfer send currency = referral currency, (referral has no receive currency OR transfer receive currency = referral receive currency), amount ≥ floor, transfer UK date ≤ `qualification_deadline`. If true → `PENDING`, store `qualifying_transfer_id`, `qualifying_amount`, `pending_at`.
 - **BR-32** On `COMPLETED` of the qualifying transfer while `PENDING` → run **award** (BR-33…BR-37).
 - **BR-33** Entitlements: `referrerEntitled = reward_type ≠ REFEREE AND referrer_reward > 0`; `referrerLate = transfer UK date > referrer_deadline`; `rewardsReferrer = referrerEntitled AND NOT referrerLate`; `rewardsReferee = reward_type ≠ REFERRER AND referee_reward > 0`.
-- **BR-34** KYC gate: if `rewardsReferee` and referee KYC ≠ PASSED → stay `PENDING`, reason `Awaiting referee KYC`, stop. If `rewardsReferrer` and referrer is ACTIVE and KYC ≠ PASSED → stay `PENDING`, reason `Awaiting referrer KYC`, stop.
-- **BR-35** Eligibility guard (port): if any rewarded party is blocked → `NOT_ELIGIBLE`, reason `Bonus blocked for <referrer|referee> <id>: <port reason>`; stop. With the default port this never happens.
+- **BR-34** KYC gate: ~~if `rewardsReferee` and referee KYC ≠ PASSED → stay `PENDING`, reason `Awaiting referee KYC`, stop.~~ *(Superseded 2026-11-16: referee credit is issued at registration; `tryAward` does not hold for referee KYC).* If `rewardsReferrer` and referrer is ACTIVE and KYC ≠ PASSED → stay `PENDING`, reason `Awaiting referrer KYC`, stop.
+- **BR-35** Eligibility guard (port): if any rewarded party is blocked → `NOT_ELIGIBLE`, reason `Bonus blocked for <referrer|referee> <id>: <port reason>`; stop (and void any unspent `referee_credit_id` issued at registration). With the default port this never happens.
 - **BR-36** Issue credits:
   - Referrer: skipped with note `Referrer account not active` if not ACTIVE; skipped with note `Referrer cap reached` if `max_referrals_per_referrer` is set and the referrer already has that many rewarded referrals (referrer_credited > 0) on this rule; else credit `referrer_reward`.
-  - Referee: credit `referee_reward`.
+  - Referee: credited at registration (`BR-27`); `tryAward` only issues `referee_reward` (`!refereeCreditId`) if it was not yet credited at registration (e.g. deferred corridor binding `BR-22` or wallet retry `BR-51`).
   - If referrer was entitled but late, note `Referrer qualification window ended`.
   - Each credit is issued with `rewardWallet.issueCredit`: currency = referral currency, `validityDays` = BV, `creditSource` `REFERRAL`, `creditSourceDetail` `REFERRER`/`REFEREE`, `referralId`, `ruleId`, `referenceId` `<referralId>:referrer|referee`, notes `Referrer reward – referred <Masked name>` / `Referee reward – invited by <Masked name>`. The wallet stores reason `REFERRAL_REWARD`.
 - **BR-37** Set `REWARDED`, `rewarded_at`, `referrer_credited`, `referee_credited`, `status_reason` = notes joined with `; ` or null. Emit `REWARD_EARNED` event per credited party. Call `onRewardIssued` per credit.

@@ -776,7 +776,7 @@ async function createReferral(q, payload = {}) {
     const referrerBy = deferred ? liveForSend.map((x) => referrerDeadlineFor(x, regDay)).sort().pop() : null;
     let refereeCredited = 0, refereeCreditId = null;
     const isBlocked = async (cid) => !!((await ports.eligibilityGuard.isEarningBlocked(cid)) || {}).blocked;
-    if (status === 'REGISTERED' && rule && rule.reward_type !== 'REFERRER' && Number(rule.referee_reward) > 0 && refereeRow.kyc_status === 'PASSED' && !(await isBlocked(referee.id))) {
+    if (status === 'REGISTERED' && rule && rule.reward_type !== 'REFERRER' && Number(rule.referee_reward) > 0 && !(await isBlocked(referee.id))) {
         try {
             refereeCreditId = await addCredit({
                 userId: referee.id, amount: rule.referee_reward, currency,
@@ -876,10 +876,6 @@ async function tryAward(q, referral) {
     const rewardsReferrer = referrerEntitled && !referrerLate;
     const rewardsReferee = r.reward_type !== 'REFERRER' && r.referee_reward > 0;
 
-    if (rewardsReferee && referee.kyc_status !== 'PASSED') {
-        await q.run(`UPDATE referrals SET status_reason = 'Awaiting referee KYC', updated_at = ? WHERE id = ?`, [nowIso(), r.id]);
-        return q.get(`SELECT * FROM referrals WHERE id = ?`, [r.id]);
-    }
     if (rewardsReferrer && referrer.account_status === 'ACTIVE' && referrer.kyc_status !== 'PASSED') {
         await q.run(`UPDATE referrals SET status_reason = 'Awaiting referrer KYC', updated_at = ? WHERE id = ?`, [nowIso(), r.id]);
         return q.get(`SELECT * FROM referrals WHERE id = ?`, [r.id]);
@@ -1305,7 +1301,7 @@ function registerReferralRoutes(app, db, hooks = {}) {
                 const referrer = await q.get(`SELECT * FROM customers WHERE id = ?`, [r.referrer_id]);
                 const referee = await q.get(`SELECT * FROM customers WHERE id = ?`, [r.referee_id]);
                 let refereeCredited = 0, refereeCreditId = null;
-                if (referee && referee.kyc_status === 'PASSED' && !(await isBlocked(r.referee_id))) {
+                if (referee && !(await isBlocked(r.referee_id))) {
                     try {
                         refereeCreditId = await addCredit({
                             userId: r.referee_id, amount: rule.referee_reward, currency: r.currency,
