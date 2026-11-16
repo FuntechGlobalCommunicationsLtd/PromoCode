@@ -305,11 +305,19 @@ async function handleTransferEvent(q, ev = {}) {
     if (!TRANSFER_STATUSES.includes(status)) throw new PromoError(400, 'VALIDATION', 'Unknown transfer status.');
     const now = clock.now().toISOString();
     const prev = await q.get('SELECT * FROM promo_transfers WHERE transfer_id = ?', [ev.transfer_id]);
+    const sameCustomer = !!(prev && prev.customer_id === ev.customer_id);
     await q.run(`INSERT INTO promo_transfers (transfer_id, customer_id, amount, currency, receive_currency, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(transfer_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
-    [ev.transfer_id, ev.customer_id, Number(ev.amount || (prev && prev.amount) || 0), String(ev.currency || (prev && prev.currency) || '').toUpperCase() || null,
-        String(ev.receive_currency || (prev && prev.receive_currency) || '').toUpperCase() || null, status, (prev && prev.created_at) || ev.created_at || now, now]);
+        ON CONFLICT(transfer_id) DO UPDATE SET
+            customer_id = excluded.customer_id,
+            amount = CASE WHEN promo_transfers.customer_id = excluded.customer_id AND excluded.amount = 0 THEN promo_transfers.amount ELSE excluded.amount END,
+            currency = CASE WHEN excluded.currency IS NOT NULL AND excluded.currency != '' THEN excluded.currency ELSE promo_transfers.currency END,
+            receive_currency = CASE WHEN promo_transfers.customer_id = excluded.customer_id THEN COALESCE(excluded.receive_currency, promo_transfers.receive_currency) ELSE excluded.receive_currency END,
+            status = excluded.status,
+            created_at = CASE WHEN promo_transfers.customer_id = excluded.customer_id THEN promo_transfers.created_at ELSE excluded.created_at END,
+            updated_at = excluded.updated_at`,
+    [ev.transfer_id, ev.customer_id, Number(ev.amount || (sameCustomer && prev.amount) || 0), String(ev.currency || (sameCustomer && prev.currency) || '').toUpperCase() || null,
+        String(ev.receive_currency || (sameCustomer && prev.receive_currency) || '').toUpperCase() || null, status, (sameCustomer && prev.created_at) || ev.created_at || now, now]);
     let released = 0;
     if (FAIL_STATUSES.includes(status)) released = (await release(q, { transaction_id: ev.transfer_id, reason: status })).released;
     return { released };

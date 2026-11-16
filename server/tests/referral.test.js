@@ -344,6 +344,64 @@ describe('Referral lifecycle (US-3.1 – US-4.4)', () => {
         expect(t.body.data[0].status).toBe('EXPIRED');
         expect(t.body.data[0].status_reason).toBe('Qualification window ended on 30/12/2026');
     });
+
+    it('awards referrer_reward when a new referee completes a recycled transfer_id on a different corridor (GBP -> NGN then GBP -> USD)', async () => {
+        const app = makeApp();
+        // Referee 1 completes TXN-202611-00001 on GBP -> NGN
+        const ngnRuleRes = await request(app).post('/api/referral-rules').send(GBP_RULE).expect(201);
+        const referrer = await request(app).post('/api/referral/customers').send({
+            id: 'REFERRER_1', first_name: 'John', last_name: 'Doe', email: 'john@x.com', phone: '+44100', send_currency: 'GBP', kyc_status: 'PASSED', device_id: 'dev-ref-1',
+        });
+        const code = referrer.body.data.referral_code;
+        await request(app).post('/api/referral/referrals').send({
+            code,
+            referee: { id: 'REFEREE_1', first_name: 'Rishi', last_name: 'Sunak', email: 'rishi@x.com', phone: '+44101', send_currency: 'GBP', receive_currency: 'NGN', kyc_status: 'PASSED', device_id: 'dev-rishi' },
+        }).expect(201);
+        await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: 'TXN-202611-00001', customer_id: 'REFEREE_1', amount: 500, currency: 'GBP', receive_currency: 'NGN', status: 'PAID',
+        }).expect(200);
+        const ref1Done = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: 'TXN-202611-00001', customer_id: 'REFEREE_1', amount: 500, currency: 'GBP', receive_currency: 'NGN', status: 'COMPLETED',
+        }).expect(200);
+        expect(ref1Done.body.referral.status).toBe('REWARDED');
+        expect(ref1Done.body.referral.referrer_credited).toBe(5);
+
+        // Archive GBP -> NGN and create GBP -> USD rule (BOTH, floor 50, referrer 5, referee 10)
+        await request(app).delete(`/api/referral-rules/${ngnRuleRes.body.id}`).expect(200);
+        await request(app).post('/api/referral-rules').send({
+            ...GBP_RULE,
+            name: 'New Final Test Rule GBP - USD',
+            base_currency: 'GBP',
+            receive_currency: 'USD',
+            reward_type: 'BOTH',
+            referrer_reward: 5,
+            referee_reward: 10,
+            min_transaction_threshold: 50,
+        }).expect(201);
+
+        // Referee 2 registers under GBP -> USD rule and completes recycled TXN-202611-00001 on GBP -> USD >= floor
+        const reg2 = await request(app).post('/api/referral/referrals').send({
+            code,
+            referee: { id: 'REFEREE_2', first_name: 'David', last_name: 'Smith', email: 'david@x.com', phone: '+44102', send_currency: 'GBP', receive_currency: 'USD', kyc_status: 'PASSED', device_id: 'dev-david' },
+        }).expect(201);
+        expect(reg2.body.data.status).toBe('REGISTERED');
+        expect(reg2.body.data.receive_currency).toBe('USD');
+        expect(reg2.body.data.referee_credited).toBe(10);
+
+        const paid2 = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: 'TXN-202611-00001', customer_id: 'REFEREE_2', amount: 60, currency: 'GBP', receive_currency: 'USD', status: 'PAID',
+        }).expect(200);
+        expect(paid2.body.referral.status).toBe('PENDING');
+
+        const ref2Done = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: 'TXN-202611-00001', customer_id: 'REFEREE_2', status: 'COMPLETED',
+        }).expect(200);
+        expect(ref2Done.body.referral.status).toBe('REWARDED');
+        expect(ref2Done.body.referral.referrer_credited).toBe(5);
+
+        const referrerWallet = await request(app).get('/api/wallet/REFERRER_1?currency=GBP');
+        expect(referrerWallet.body.balances[0].available).toBe(10); // 5 from Referee 1 + 5 from Referee 2
+    });
 });
 
 describe('Referee bonus timing', () => {

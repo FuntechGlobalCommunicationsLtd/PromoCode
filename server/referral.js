@@ -867,7 +867,7 @@ async function tryAward(q, referral) {
     const r = await q.get(`SELECT * FROM referrals WHERE id = ?`, [referral.id]);
     if (!r || r.status !== 'PENDING') return r;
     const transfer = await q.get(`SELECT * FROM referral_transfers WHERE transfer_id = ?`, [r.qualifying_transfer_id]);
-    if (!transfer || transfer.status !== 'COMPLETED') return r;
+    if (!transfer || transfer.status !== 'COMPLETED' || transfer.customer_id !== r.referee_id) return r;
     const referrer = await q.get(`SELECT * FROM customers WHERE id = ?`, [r.referrer_id]);
     const referee = await q.get(`SELECT * FROM customers WHERE id = ?`, [r.referee_id]);
     // Both the referee's bonus validity and the referrer's qualification window are governed by Bonus Validity (Days)
@@ -992,11 +992,19 @@ async function handleTransferEvent(q, ev) {
     const status = String(ev.status || '').toUpperCase();
     if (!ev.transfer_id || !ev.customer_id || !status) throw Object.assign(new Error('transfer_id, customer_id and status are required'), { status: 400 });
     const prev = await q.get(`SELECT * FROM referral_transfers WHERE transfer_id = ?`, [ev.transfer_id]);
-    const createdAt = (prev && prev.created_at) || ev.created_at || nowIso();
+    const sameCustomer = !!(prev && prev.customer_id === ev.customer_id);
+    const createdAt = (sameCustomer && prev.created_at) || ev.created_at || nowIso();
     await q.run(`INSERT INTO referral_transfers (transfer_id, customer_id, amount, currency, receive_currency, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(transfer_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
-    [ev.transfer_id, ev.customer_id, Number(ev.amount || (prev && prev.amount) || 0), String(ev.currency || (prev && prev.currency) || '').toUpperCase(),
-        String(ev.receive_currency || (prev && prev.receive_currency) || '').toUpperCase() || null, status, createdAt, nowIso()]);
+        ON CONFLICT(transfer_id) DO UPDATE SET
+            customer_id = excluded.customer_id,
+            amount = CASE WHEN referral_transfers.customer_id = excluded.customer_id AND excluded.amount = 0 THEN referral_transfers.amount ELSE excluded.amount END,
+            currency = CASE WHEN excluded.currency != '' THEN excluded.currency ELSE referral_transfers.currency END,
+            receive_currency = CASE WHEN referral_transfers.customer_id = excluded.customer_id THEN COALESCE(excluded.receive_currency, referral_transfers.receive_currency) ELSE excluded.receive_currency END,
+            status = excluded.status,
+            created_at = CASE WHEN referral_transfers.customer_id = excluded.customer_id THEN referral_transfers.created_at ELSE excluded.created_at END,
+            updated_at = excluded.updated_at`,
+    [ev.transfer_id, ev.customer_id, Number(ev.amount || (sameCustomer && prev.amount) || 0), String(ev.currency || (sameCustomer && prev.currency) || '').toUpperCase(),
+        String(ev.receive_currency || (sameCustomer && prev.receive_currency) || '').toUpperCase() || null, status, createdAt, nowIso()]);
     const transfer = await q.get(`SELECT * FROM referral_transfers WHERE transfer_id = ?`, [ev.transfer_id]);
 
     // Giving back bonus that a cancelled or refunded transfer used is the bonus module's job (BR-43)

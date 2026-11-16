@@ -562,4 +562,22 @@ describe('Idempotency, manual credits, feed and admin ledger', () => {
         expect((await request(app).get('/api/wallet/anyone')).status).toBe(401);
         expect((await request(app).get('/api/wallet/anyone').set('X-Bonus-Service-Key', 'contract-key')).status).toBe(200);
     });
+
+    rule('BONUS-28', 'A recycled transfer_id from a different customer evaluates schemes for the new customer instead of skipping as DUPLICATE_EVENT', {
+        why: 'If an upstream sequence reset reuses TXN-202611-00001 for a second customer, triggerEvent() must scope duplicate checks to (scheme_id, user_id) and upsertTransfer() must update bonus_transfers to the new customer.',
+        fix: 'bonus/engine.js triggerEvent() checks user_id on credit_ledger duplicate lookup, awardScheme() scopes conflicting reference_id by user_id, and upsertTransfer() updates customer_id/amount/currency/receive_currency on cross-customer conflict.',
+        where: ['server/bonus/engine.js'],
+    })(async () => {
+        const s = await scheme({ min_transaction_threshold: 50, credit_amount: 5 });
+        const c1 = cust('C1');
+        const c2 = cust('C2');
+        const recycledId = `TXN-RECYCLED-${seq++}`;
+        expect(outcome(await event(recycledId, c1, 100), s)).toMatchObject({ status: 'AWARDED', amount: 5 });
+        // Same customer replaying the same transfer_id is still DUPLICATE_EVENT
+        expect(outcome(await event(recycledId, c1, 100), s)).toMatchObject({ status: 'SKIPPED', reason: 'DUPLICATE_EVENT' });
+        // Different customer completing a transfer with the recycled transfer_id is evaluated and awarded
+        expect(outcome(await event(recycledId, c2, 100), s)).toMatchObject({ status: 'AWARDED', amount: 5 });
+        expect((await balance(c1)).available).toBe(5);
+        expect((await balance(c2)).available).toBe(5);
+    });
 });

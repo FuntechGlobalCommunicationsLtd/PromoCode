@@ -122,7 +122,14 @@ async function awardScheme(q, input) {
     const amount = computeAmount(scheme, baseAmount);
     if (!(amount > 0)) throw new Reject(400, 'ZERO_AMOUNT', `The bonus from "${scheme.name}" works out at 0 for this activity, so nothing was awarded.`);
 
-    const refId = event_id ? `evt:${scheme.id}:${event_id}` : idempotency_key ? `idem_${idempotency_key}` : (transaction_id || null);
+    let refId = event_id ? `evt:${scheme.id}:${event_id}` : idempotency_key ? `idem_${idempotency_key}` : (transaction_id || null);
+    if (event_id) {
+        const otherUserRow = await q.get(
+            'SELECT id FROM credit_ledger WHERE scheme_id = ? AND reference_id = ? AND user_id <> ?',
+            [scheme.id, refId, user_id],
+        );
+        if (otherUserRow) refId = `evt:${scheme.id}:${user_id}:${event_id}`;
+    }
     let out;
     try {
         out = await wallet.issueCredit(q, {
@@ -152,7 +159,10 @@ async function triggerEvent(q, ev) {
     const results = [];
     for (const scheme of schemes) {
         try {
-            const dup = await q.get('SELECT id FROM credit_ledger WHERE scheme_id = ? AND reference_id = ?', [scheme.id, `evt:${scheme.id}:${ev.event_id}`]);
+            const dup = await q.get(
+                'SELECT id FROM credit_ledger WHERE scheme_id = ? AND user_id = ? AND (reference_id = ? OR reference_id = ?)',
+                [scheme.id, ev.customer_id, `evt:${scheme.id}:${ev.event_id}`, `evt:${scheme.id}:${ev.customer_id}:${ev.event_id}`],
+            );
             if (dup) { results.push({ scheme_id: scheme.id, scheme_name: scheme.name, status: 'SKIPPED', reason: 'DUPLICATE_EVENT' }); continue; }
             const out = await awardScheme(q, {
                 scheme, user_id: ev.customer_id, amount: ev.amount, currency: ev.currency, event_id: ev.event_id, event: true, eventType: ev.type, admin_user: 'System',
@@ -169,8 +179,11 @@ async function triggerEvent(q, ev) {
 // ---------- reversal (BS-45) ----------
 // A transfer / request that earned scheme bonuses was cancelled, failed or refunded: void what is still unused; the
 // spent part becomes clawback debt (when enabled). FAILED is not the customer's doing, so it is not a strike.
-async function reverseEvent(q, eventId, outcome = 'REFUNDED') {
-    const credits = await q.all(`SELECT * FROM credit_ledger WHERE type = 'EARNED' AND amount > 0 AND reference_id LIKE ?`, [`evt:%:${eventId}`]);
+async function reverseEvent(q, eventId, outcome = 'REFUNDED', customerId = null) {
+    const credits = await q.all(
+        `SELECT * FROM credit_ledger WHERE type = 'EARNED' AND amount > 0 AND reference_id LIKE ? ${customerId ? 'AND user_id = ?' : ''}`,
+        customerId ? [`evt:%:${eventId}`, customerId] : [`evt:%:${eventId}`],
+    );
     const out = [];
     const perCustomer = {};
     for (const c of credits) {
@@ -207,13 +220,19 @@ async function reverseEvent(q, eventId, outcome = 'REFUNDED') {
 async function upsertTransfer(q, ev) {
     const status = String(ev.status || '').toUpperCase();
     const prev = await q.get('SELECT * FROM bonus_transfers WHERE transfer_id = ?', [ev.transfer_id]);
-    const createdAt = (prev && prev.created_at) || ev.created_at || nowIso();
+    const sameCustomer = !!(prev && prev.customer_id === ev.customer_id);
+    const createdAt = (sameCustomer && prev.created_at) || ev.created_at || nowIso();
     await q.run(`INSERT INTO bonus_transfers (transfer_id, customer_id, amount, currency, receive_currency, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(transfer_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
-            amount = COALESCE(bonus_transfers.amount, excluded.amount), currency = COALESCE(NULLIF(bonus_transfers.currency, ''), excluded.currency),
-            receive_currency = COALESCE(bonus_transfers.receive_currency, excluded.receive_currency)`,
-    [ev.transfer_id, ev.customer_id, Number(ev.amount || (prev && prev.amount) || 0), String(ev.currency || (prev && prev.currency) || '').toUpperCase(),
-        String(ev.receive_currency || (prev && prev.receive_currency) || '').toUpperCase() || null, status, createdAt, nowIso()]);
+        ON CONFLICT(transfer_id) DO UPDATE SET
+            customer_id = excluded.customer_id,
+            status = excluded.status,
+            updated_at = excluded.updated_at,
+            amount = CASE WHEN bonus_transfers.customer_id = excluded.customer_id AND excluded.amount = 0 THEN COALESCE(bonus_transfers.amount, excluded.amount) ELSE excluded.amount END,
+            currency = CASE WHEN excluded.currency != '' THEN excluded.currency ELSE bonus_transfers.currency END,
+            receive_currency = CASE WHEN bonus_transfers.customer_id = excluded.customer_id THEN COALESCE(excluded.receive_currency, bonus_transfers.receive_currency) ELSE excluded.receive_currency END,
+            created_at = CASE WHEN bonus_transfers.customer_id = excluded.customer_id THEN bonus_transfers.created_at ELSE excluded.created_at END`,
+    [ev.transfer_id, ev.customer_id, Number(ev.amount || (sameCustomer && prev.amount) || 0), String(ev.currency || (sameCustomer && prev.currency) || '').toUpperCase(),
+        String(ev.receive_currency || (sameCustomer && prev.receive_currency) || '').toUpperCase() || null, status, createdAt, nowIso()]);
     return q.get('SELECT * FROM bonus_transfers WHERE transfer_id = ?', [ev.transfer_id]);
 }
 
@@ -239,7 +258,7 @@ async function handleTransferEvent(q, ev) {
         result.awards = await triggerEvent(q, { type: 'TRANSFER_COMPLETED', customer_id: ev.customer_id, event_id: ev.transfer_id, amount: Number(ev.amount), currency: ev.currency });
     } else if (FAIL_STATUSES.includes(status)) {
         result.returned = await wallet.releaseBonus(q, ev.customer_id, ev.transfer_id);
-        result.reversed = await reverseEvent(q, ev.transfer_id, status);
+        result.reversed = await reverseEvent(q, ev.transfer_id, status, ev.customer_id);
     }
     return result;
 }

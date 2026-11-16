@@ -689,4 +689,130 @@ describe('Tracking, offers and performance endpoints', () => {
         expect(tunnelCsv.body.data.filename).toBe('referral-tracking.csv');
         expect(tunnelCsv.body.data.csv.split('\n')).toHaveLength(2);
     });
+
+    rule('REFERRAL-28', 'Recycled transfer_id across customers does not poison corridor or amount qualification for a new referee', {
+        why: 'If the upstream app restarts an in-memory sequence and reuses TXN-202611-00001 for a different customer on a new corridor (e.g. GBP -> USD after an earlier customer sent GBP -> NGN), referral_transfers and bonus_transfers must update customer_id, amount, currency, receive_currency and created_at so the new referee qualifies and the referrer receives their reward.',
+        fix: 'referral.js handleTransferEvent(), bonus/engine.js upsertTransfer() & triggerEvent(), and promo/engine.js handleTransferEvent() overwrite transfer fields when customer_id changes and scope scheme duplicate checks by user_id; tryAward() verifies transfer.customer_id === r.referee_id.',
+        where: [FILE, 'server/bonus/engine.js', 'server/promo/engine.js'],
+    })(async () => {
+        // Archive any pre-existing GBP rules so we can test the exact GBP -> NGN then GBP -> USD scenario
+        const existingGbp = ((await request(app).get('/api/referral-rules')).body.data || []).filter((x) => x.base_currency === 'GBP');
+        for (const r of existingGbp) {
+            await request(app).delete(`/api/referral-rules/${r.id}`).expect(200);
+        }
+
+        const recycledTxnId = 'TXN-202611-00001';
+
+        // Step 1: Referee 1 registers under GBP -> NGN and completes TXN-202611-00001 on GBP -> NGN
+        setNow('2026-11-13T15:38:34Z');
+        const ruleNgn = await mkRule({
+            corridor: ['GBP', 'NGN'],
+            name: `UK to Nigeria ${n()}`,
+            reward_type: 'BOTH',
+            referrer_reward: 5,
+            referee_reward: 10,
+            min_transaction_threshold: 50,
+        });
+        const referrer1 = await mkCustomer('GBP', { first_name: 'John', last_name: 'ReferrerOne' });
+        const referee1Id = `RISHI-${Date.now().toString(36)}-${n()}`;
+        const reg1 = await register(referrer1.referral_code, {
+            id: referee1Id,
+            first_name: 'Rishi',
+            last_name: 'Sunak',
+            email: `${referee1Id}@example.com`,
+            phone: `+44776${String(1000000 + seq)}`,
+            send_currency: 'GBP',
+            receive_currency: 'NGN',
+            kyc_status: 'PASSED',
+            device_id: `dev-${referee1Id}`,
+        });
+        expect(reg1.status).toBe(201);
+        await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: recycledTxnId,
+            customer_id: referee1Id,
+            amount: 500,
+            currency: 'GBP',
+            receive_currency: 'NGN',
+            status: 'PAID',
+            created_at: referral.clock.now().toISOString(),
+        }).expect(200);
+        const done1 = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: recycledTxnId,
+            customer_id: referee1Id,
+            amount: 500,
+            currency: 'GBP',
+            receive_currency: 'NGN',
+            status: 'COMPLETED',
+            created_at: referral.clock.now().toISOString(),
+        }).expect(200);
+        expect(done1.body.referral).toMatchObject({ status: 'REWARDED', referrer_credited: 5, referee_credited: 10 });
+
+        // Archive GBP -> NGN rule and create GBP -> USD rule (Rule 92 in live Render incident)
+        await request(app).delete(`/api/referral-rules/${ruleNgn.id}`).expect(200);
+        setNow('2026-11-16T06:38:45Z');
+        await mkRule({
+            corridor: ['GBP', 'USD'],
+            name: `New Final Test Rule GBP - USD ${n()}`,
+            reward_type: 'BOTH',
+            referrer_reward: 5,
+            referee_reward: 10,
+            min_transaction_threshold: 50,
+        });
+
+        // Step 2: Referee 2 registers under GBP -> USD rule and completes recycled TXN-202611-00001 on GBP -> USD >= floor
+        const referrer2 = await mkCustomer('GBP', { first_name: 'John', last_name: 'ReferrerTwo' });
+        const referee2Id = `DAVID-${Date.now().toString(36)}-${n()}`;
+        const reg2 = await register(referrer2.referral_code, {
+            id: referee2Id,
+            first_name: 'David',
+            last_name: 'Tester',
+            email: `${referee2Id}@example.com`,
+            phone: `+44777${String(1000000 + seq)}`,
+            send_currency: 'GBP',
+            receive_currency: 'USD',
+            kyc_status: 'PASSED',
+            device_id: `dev-${referee2Id}`,
+        });
+        expect(reg2.status).toBe(201);
+        expect(reg2.body.data).toMatchObject({
+            status: 'REGISTERED',
+            currency: 'GBP',
+            receive_currency: 'USD',
+            referrer_reward: 5,
+            referee_reward: 10,
+            referee_credited: 10,
+            floor: 50,
+        });
+
+        const paid2 = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: recycledTxnId,
+            customer_id: referee2Id,
+            amount: 60,
+            currency: 'GBP',
+            receive_currency: 'USD',
+            status: 'PAID',
+            created_at: referral.clock.now().toISOString(),
+        }).expect(200);
+        expect(paid2.body.referral).toMatchObject({
+            status: 'PENDING',
+            qualifying_transfer_id: recycledTxnId,
+            qualifying_amount: 60,
+        });
+
+        const done2 = await request(app).post('/api/referral/transfer-events').send({
+            transfer_id: recycledTxnId,
+            customer_id: referee2Id,
+            amount: 60,
+            currency: 'GBP',
+            receive_currency: 'USD',
+            status: 'COMPLETED',
+            created_at: referral.clock.now().toISOString(),
+        }).expect(200);
+        expect(done2.body.referral).toMatchObject({
+            status: 'REWARDED',
+            referrer_credited: 5,
+            referee_credited: 10,
+        });
+        expect(await available(referrer2.id, 'GBP')).toBe(5);
+    });
 });
